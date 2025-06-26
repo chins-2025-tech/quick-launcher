@@ -257,22 +257,25 @@ def get_system_warning_icon(size=16):
     _system_icon_cache[key] = tk_icon
     return tk_icon
 
-def get_file_icon(path, size=20):
+def get_file_icon(path, size=16):
     """ファイルパスからアイコンを取得する。パスが存在しない場合は警告アイコンを返す。"""
 
-    # まず、ファイル/フォルダの存在を確認する
-    if not os.path.exists(path):
-        return get_system_warning_icon(size)
-
     key = (path, size)
-    if key in _icon_cache: return _icon_cache[key]
+    # まず、キャッシュを確認
+    if key in _icon_cache:
+        return _icon_cache[key]
+    # ファイル/フォルダの存在を確認
+    if not os.path.exists(path):
+        warn_icon = get_system_warning_icon(size)
+        _icon_cache[key] = warn_icon  # 無効パスもキャッシュ
+        return warn_icon
     info = SHFILEINFO()
     res = shell32.SHGetFileInfoW(path, 0, ctypes.byref(info), ctypes.sizeof(info), 0x100 | 0x1)
     tk_icon = _hicon_to_photoimage(info.hIcon, size) if res and info.hIcon else get_system_folder_icon(size)
     _icon_cache[key] = tk_icon
     return tk_icon
 
-def get_web_icon(url, size=20):
+def get_web_icon(url, size=16):
     """
     URLからファビコンを取得する。
     settingsに応じてオンライン(Google)/オフライン(直接取得)を切り替える。
@@ -343,7 +346,7 @@ def get_web_icon(url, size=20):
     _icon_cache[key] = tk_icon
     return tk_icon
 
-def _get_or_create_default_browser_icon(size=20):
+def _get_or_create_default_browser_icon(size=16):
     """内部用のヘルパー。デフォルトブラウザアイコンを取得、失敗時は警告アイコン。"""
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice") as key:
@@ -480,7 +483,7 @@ class SettingsDialog(simpledialog.Dialog):
 
 # --- リンク編集画面 ---
 class LinksEditDialog(tk.Toplevel):
-    LINK_ICON_SIZE = 18
+    LINK_ICON_SIZE = 16  # 18→16に統一
     LINK_ROW_HEIGHT = 24
 
     def __init__(self, parent, groups, settings):
@@ -502,7 +505,7 @@ class LinksEditDialog(tk.Toplevel):
         self.result = None
 
         self.resizable(True, True)
-        self.minsize(550, 400)
+        self.minsize(600, 400)
 
         # --- レイアウト設定 ---
         self.grid_rowconfigure(0, weight=1)
@@ -511,17 +514,21 @@ class LinksEditDialog(tk.Toplevel):
         main_pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main_pane.grid(row=0, column=0, sticky="nsew")
 
-        title_font = (self.settings['font'], self.settings['size'] - 1)
-        content_font = (self.settings['font'], self.settings['size'])
+        # --- フォント定義（下線なしを明示） ---
+        title_font = tkfont.Font(family=self.settings['font'], size=self.settings['size'] - 1, underline=False)
+        content_font = tkfont.Font(family=self.settings['font'], size=self.settings['size'], underline=False)
 
         # --- 左ペイン：グループ一覧 ---
-        group_pane = tk.LabelFrame(main_pane, text="グループ", font=title_font, bd=1, padx=2, pady=2)
+        # 幅を明示的に広げる（例: width=180）
+        group_outer = tk.Frame(main_pane, width=115)
+        group_outer.pack_propagate(False)
+        group_pane = tk.LabelFrame(group_outer, text="グループ", font=title_font, bd=1, padx=8, pady=2)  # 内側余白を大きめに
+        group_pane.pack(expand=True, fill="both")
         group_pane.grid_rowconfigure(0, weight=1)
         group_pane.grid_columnconfigure(0, weight=1)
-        main_pane.add(group_pane, weight=1)
         group_scrollbar = tk.Scrollbar(group_pane, orient="vertical")
         self.group_listbox = tk.Listbox(group_pane, yscrollcommand=group_scrollbar.set, exportselection=False, font=content_font)
-        self.group_listbox.grid(row=0, column=0, sticky="nsew")
+        self.group_listbox.grid(row=0, column=0, sticky="nsew", pady=(1,0))
         group_scrollbar.config(command=self.group_listbox.yview)
         group_scrollbar.grid(row=0, column=1, sticky="ns")
         self.group_listbox.bind('<<ListboxSelect>>', self.on_group_select)
@@ -532,24 +539,28 @@ class LinksEditDialog(tk.Toplevel):
         tk.Button(group_btns_frame, text="削除", command=self.delete_group).pack(side="left")
         tk.Button(group_btns_frame, text="↑", command=self.move_group_up).pack(side="left")
         tk.Button(group_btns_frame, text="↓", command=self.move_group_down).pack(side="left")
+        main_pane.add(group_outer, weight=1)
         # --- 右ペイン：リンク一覧 ---
-        link_pane = tk.LabelFrame(main_pane, text="リンク", font=title_font, bd=1, padx=2, pady=2)
+        link_outer = tk.Frame(main_pane)
+        link_outer.pack_propagate(False)
+        link_pane = tk.LabelFrame(link_outer, text="リンク", font=title_font, bd=1, padx=8, pady=2)  # 内側余白を大きめに
+        link_pane.pack(expand=True, fill="both")
         link_pane.grid_rowconfigure(1, weight=1)
         link_pane.grid_columnconfigure(0, weight=1)
-        main_pane.add(link_pane, weight=4)
+        # --- EntryとCanvasの左端を完全に揃えるため、padx=0で統一 ---
         link_addr_row = tk.Frame(link_pane)
-        link_addr_row.grid(row=0, column=0, columnspan=2, sticky="ew", padx=2, pady=2)
+        link_addr_row.grid(row=0, column=0, columnspan=2, sticky="ew", padx=0, pady=0)  # padx=0
         link_addr_row.grid_columnconfigure(0, weight=1)
         link_addr_row.grid_rowconfigure(0, weight=1) 
         self.link_addr_var = tk.StringVar()
         self.link_addr_entry = ttk.Entry(link_addr_row, textvariable=self.link_addr_var, font=content_font )
-        self.link_addr_entry.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        self.link_addr_entry.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
         self.save_addr_btn = tk.Button(link_addr_row, text="保存", command=self.save_link_addr)
         self.save_addr_btn.grid(row=0, column=1, sticky="e")
         self.link_addr_entry.bind("<FocusIn>", self.on_link_addr_focus)
         link_scrollbar = tk.Scrollbar(link_pane, orient="vertical")
         self.link_canvas = tk.Canvas(link_pane, bg="#ffffff", highlightthickness=0)
-        self.link_canvas.grid(row=1, column=0, sticky="nsew")
+        self.link_canvas.grid(row=1, column=0, sticky="nsew", padx=0)  # padx=0
         link_scrollbar.config(command=self.link_canvas.yview)
         link_scrollbar.grid(row=1, column=1, sticky="ns")
         self.link_canvas.configure(yscrollcommand=link_scrollbar.set)
@@ -562,12 +573,13 @@ class LinksEditDialog(tk.Toplevel):
         #self.tooltip = ToolTip(self.link_canvas)
         #self.canvas_item_map = {} # {canvas_item_id: path_string}
         link_btns = tk.Frame(link_pane)
-        link_btns.grid(row=2, column=0, columnspan=2, sticky="w", pady=(5,0))
+        link_btns.grid(row=2, column=0, columnspan=2, sticky="ew")
         tk.Button(link_btns, text="追加", command=self.add_link).pack(side="left")
         tk.Button(link_btns, text="名変更", command=self.rename_link).pack(side="left")
         tk.Button(link_btns, text="削除", command=self.delete_link).pack(side="left")
         tk.Button(link_btns, text="↑", command=self.move_link_up).pack(side="left")
         tk.Button(link_btns, text="↓", command=self.move_link_down).pack(side="left")
+        main_pane.add(link_outer, weight=4)
 
         # --- OK/Cancelボタン ---
         button_frame = tk.Frame(self)
@@ -675,6 +687,14 @@ class LinksEditDialog(tk.Toplevel):
         if name and path:
             self.groups[self.selected_group]['links'].append({'name': name, 'path': path})
             self.selected_link = len(self.groups[self.selected_group]['links'])-1
+            # --- 追加したリンクのアイコンを個別にキャッシュ取得 ---
+            try:
+                if path.startswith('http'):
+                    get_web_icon(path, size=16)
+                else:
+                    get_file_icon(path, size=16)
+            except Exception as e:
+                logging.info(f"[add_link] icon fetch failed: {path} (16px): {e}")
             self.refresh_link_list()
 
     def rename_link(self):
@@ -739,10 +759,16 @@ class LinksEditDialog(tk.Toplevel):
         canvas_width = self.link_canvas.winfo_width() or 360
         for i, link in enumerate(links):
             path = link['path']
+            icon = None
             if path.startswith('http'):
-                icon = get_web_icon(path, size=self.LINK_ICON_SIZE)
+                domain = urlparse(path).netloc
+                key = (domain, self.LINK_ICON_SIZE)
+                icon = _icon_cache.get(key)
             else:
-                icon = get_file_icon(path, size=self.LINK_ICON_SIZE)
+                key = (path, self.LINK_ICON_SIZE)
+                icon = _icon_cache.get(key)
+            if not icon:
+                icon = _create_fallback_icon(self.LINK_ICON_SIZE)
             if icon:
                 self.link_canvas.create_image(8, y + self.LINK_ROW_HEIGHT // 2, image=icon, anchor="w")
                 self.icon_refs.append(icon)
@@ -787,7 +813,7 @@ class LinksEditDialog(tk.Toplevel):
     def refresh_group_list(self):
         self.group_listbox.delete(0, tk.END)
         for g in self.groups:
-            self.group_listbox.insert(tk.END, g['group'])
+            self.group_listbox.insert(tk.END, " " + g['group'])  # 先頭にスペースで左余白
         if self.groups:
             self.group_listbox.select_set(self.selected_group)
         # グループリスト更新時はリンクリストを空に
@@ -821,7 +847,22 @@ class LinksEditDialog(tk.Toplevel):
         if not self.groups or self.selected_link is None:
             return
         links = self.groups[self.selected_group]['links']
-        links[self.selected_link]['path'] = self.link_addr_var.get()
+        old_path = links[self.selected_link]['path']
+        new_path = self.link_addr_var.get()
+        links[self.selected_link]['path'] = new_path
+        # キャッシュクリア（旧パス・新パス両方）
+        for p in (old_path, new_path):
+            key = (p, self.LINK_ICON_SIZE)
+            if key in _icon_cache:
+                del _icon_cache[key]
+        # 新しいパスのアイコンを取得
+        try:
+            if new_path.startswith('http'):
+                get_web_icon(new_path, size=self.LINK_ICON_SIZE)
+            else:
+                get_file_icon(new_path, size=self.LINK_ICON_SIZE)
+        except Exception as e:
+            logging.info(f"[save_link_addr] icon fetch failed: {new_path} ({self.LINK_ICON_SIZE}px): {e}")
         self.refresh_link_list()
 
     def on_link_addr_focus(self, event):
@@ -901,7 +942,7 @@ class LinksEditDialog(tk.Toplevel):
 class LinkPopup(tk.Toplevel):
     # --- レイアウト定数 ---
     GROUP_ROW_HEIGHT = 24
-    ICON_SIZE = 16
+    ICON_SIZE = 16  # 16pxに統一
     ICON_COLUMN_WIDTH = 24  # アイコンを描画する領域の幅 (アイコンサイズ + 余白)
     TEXT_LEFT_PADDING = 0   # アイコンとテキストの間の隙間
     
@@ -1091,8 +1132,16 @@ class LinkPopup(tk.Toplevel):
 
             # アイコンの取得
             path = link['path']
-            icon = get_web_icon(path, self.ICON_SIZE) if path.startswith('http') else get_file_icon(path, self.ICON_SIZE)
-            if not icon: icon = self.folder_icon # フォールバック
+            icon = None
+            if path.startswith('http'):
+                domain = urlparse(path).netloc
+                key = (domain, self.ICON_SIZE)
+                icon = _icon_cache.get(key)
+            else:
+                key = (path, self.ICON_SIZE)
+                icon = _icon_cache.get(key)
+            if not icon:
+                icon = _create_fallback_icon(self.ICON_SIZE)
             
             icon_label = tk.Label(row, image=icon, bg=self.settings['bg'])
             # gridで配置 (column 0)
@@ -1202,6 +1251,28 @@ def main():
     tray_thread = threading.Thread(target=run_tray, daemon=True)
     tray_thread.start()
     
+    # --- 起動直後に全リンクのアイコンを事前キャッシュするバックグラウンドスレッド ---
+    def preload_all_link_icons():
+        try:
+            links_data = load_links_data()
+            for group in links_data:
+                for link in group.get('links', []):
+                    path = link.get('path', '')
+                    size = 16  # 16pxに統一
+                    if path.startswith('http'):
+                        try:
+                            get_web_icon(path, size=size)
+                        except Exception as e:
+                            logging.info(f"[preload] get_web_icon failed: {path} ({size}px): {e}")
+                    else:
+                        try:
+                            get_file_icon(path, size=size)
+                        except Exception as e:
+                            logging.info(f"[preload] get_file_icon failed: {path} ({size}px): {e}")
+        except Exception as e:
+            logging.warning(f"[preload] preload_all_link_icons failed: {e}")
+    threading.Thread(target=preload_all_link_icons, daemon=True).start()
+
     # 1. ルートウィンドウを先に作成する
     root = tk.Tk()
     root.withdraw() # すぐに非表示にする
