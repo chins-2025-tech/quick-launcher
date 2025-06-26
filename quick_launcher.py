@@ -47,6 +47,16 @@ DEFAULT_SETTINGS = {
 shell32 = ctypes.windll.shell32
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
+gdi32.DeleteObject.restype = wintypes.BOOL
+
+class RECT(ctypes.Structure):
+    _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG),
+                ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+# SystemParametersInfoWで作業領域を取得するための定義
+SPI_GETWORKAREA = 0x0030
+user32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
+user32.SystemParametersInfoW.restype = wintypes.BOOL
 
 class SHFILEINFO(ctypes.Structure):
     _fields_ = [("hIcon", wintypes.HICON), ("iIcon", ctypes.c_int), ("dwAttributes", wintypes.DWORD),
@@ -78,6 +88,21 @@ _system_icon_cache = {}
 _default_browser_icon = None
 
 # --- ヘルパー関数 ---
+def get_work_area():
+    """
+    Windows APIを呼び出し、タスクバーなどを除いたデスクトップの作業領域を取得する。
+    戻り値: (left, top, right, bottom) のタプル
+    """
+    work_area_rect = RECT()
+    # SystemParametersInfoWを呼び出して作業領域をwork_area_rectに格納
+    if user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(work_area_rect), 0):
+        return work_area_rect.left, work_area_rect.top, work_area_rect.right, work_area_rect.bottom
+    else:
+        # API呼び出しに失敗した場合のフォールバック
+        screen_w = user32.GetSystemMetrics(0) # SM_CXSCREEN
+        screen_h = user32.GetSystemMetrics(1) # SM_CYSCREEN
+        return 0, 0, screen_w, screen_h
+
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -1015,27 +1040,32 @@ class LinkPopup(tk.Toplevel):
         self.update_idletasks() # ウィンドウサイズを計算させる
 
         # --- ここからが座標調整ロジック ---
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
+        # タスクバーを除いた作業領域の座標を取得
+        wa_left, wa_top, wa_right, wa_bottom = get_work_area()
+
         win_w = self.winfo_width()
         win_h = self.winfo_height()
 
-        # 理想の表示座標を計算
+        # 理想の表示座標を計算（カーソルの少し上に表示）
         x = self.winfo_pointerx() - win_w // 2
-        y = self.winfo_pointery() - win_h - 10 # カーソルの少し上に表示
+        y = self.winfo_pointery() - win_h - 10 
 
-        # X座標の調整 (画面の左右にはみ出さないように)
-        if x + win_w > screen_w:
-            x = screen_w - win_w - 5 # 右端に余裕を持たせる
-        if x < 0:
-            x = 5 # 左端に余裕を持たせる
+        # X座標の調整 (作業領域の左右にはみ出さないように)
+        if x + win_w > wa_right:
+            x = wa_right - win_w - 5 # 右端に余裕を持たせる
+        if x < wa_left:
+            x = wa_left + 5 # 左端に余裕を持たせる
 
-        # Y座標の調整 (画面の上にはみ出さないように)
-        # 下にはみ出すケースは、タスクバーがあるため通常は少ないが念のため考慮
-        if y < 0:
-            y = self.winfo_pointery() + 20 # カーソルの下側に表示位置を変更
-        if y + win_h > screen_h:
-            y = screen_h - win_h - 5 # 下端に余裕を持たせる
+        # Y座標の調整 (作業領域の上下にはみ出さないように)
+        # まず、上にはみ出す場合
+        if y < wa_top:
+            # カーソルの下側に表示位置を変更
+            y = self.winfo_pointery() + 20
+        
+        # 次に、下にはみ出す場合（タスクバーを考慮）
+        if y + win_h > wa_bottom:
+            # 作業領域の下端ぴったりに合わせる
+            y = wa_bottom - win_h - 5 # 下端に余裕を持たせる
         # --- ここまでが座標調整ロジック ---
 
         self.geometry(f"+{x}+{y}")
