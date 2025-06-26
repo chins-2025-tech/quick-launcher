@@ -1228,6 +1228,7 @@ def main():
     
     # 4. メインループを開始
     root.mainloop()
-
+    logging.shutdown()
+    
 if __name__ == "__main__":
     main()
