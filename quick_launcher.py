@@ -866,7 +866,8 @@ class LinksEditDialog(tk.Toplevel):
         idx = (event.y - 2) // self.LINK_ROW_HEIGHT
         links = self.groups[self.selected_group]['links']
         if 0 <= idx < len(links):
-            os.startfile(links[idx]['path'])
+            path = links[idx]['path']
+            open_link(path)
 
     def save_link_addr(self):
         if not self.groups or self.selected_link is None:
