@@ -1227,8 +1227,19 @@ def main():
     popup = LinkPopup(root, settings)
     
     # 4. メインループを開始
-    root.mainloop()
-    logging.shutdown()
+    try:
+        root.mainloop()
+    finally:
+        # --- すべてのFileHandlerを明示的にclose & remove ---
+        logger = logging.getLogger()
+        handlers = logger.handlers[:]
+        for handler in handlers:
+            try:
+                handler.close()
+            except Exception:
+                pass
+            logger.removeHandler(handler)
+        logging.shutdown()
     
 if __name__ == "__main__":
     main()
