@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# 仮想環境
+venv/
+.venv/
+ENV/
+.env/
+
+# VSCode
+.vscode/
+
+# OSごみファイル
+.DS_Store
+Thumbs.db
+
+# 設定・データファイル
+settings.json
+links.json
+
+# Pillowキャッシュ
+*.png
+
+# その他
+app_errors.log
+
+# PyInstaller生成物
+build/
+dist/
+*.spec
