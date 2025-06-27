@@ -21,7 +21,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
 # --- アプリケーション設定 ---
-logging.basicConfig(filename='app_errors.log', level=logging.DEBUG,
+logging.basicConfig(filename='app_errors.log', level=logging.ERROR,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 if getattr(sys, 'frozen', False):
@@ -1165,7 +1165,7 @@ class LinkPopup(tk.Toplevel):
         max_group_width = 220  # グループ名の最大幅(px)
         # --- ここでarrow_char/font_arrowを定義 ---
         try:
-            arrow_font_size = max(8, self.icon_size - 2)
+            arrow_font_size = max(12, self.icon_size - 2)
             font_arrow = tkfont.Font(family='Marlett', size=arrow_font_size)
             arrow_char = '4'
         except tk.TclError:
@@ -1399,7 +1399,7 @@ def main():
     def preload_all_link_icons():
         try:
             links_data = load_links_data()
-            preload_sizes = [8, 12, 16, 20, 24, 28, 32]
+            preload_sizes = [12, 16, 20, 24, 28, 32]
             for group in links_data:
                 for link in group.get('links', []):
                     path = link.get('path', '')
