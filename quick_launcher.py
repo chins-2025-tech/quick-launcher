@@ -85,7 +85,7 @@ gdi32.DeleteObject.restype = wintypes.BOOL
 # --- グローバルキャッシュ ---
 _icon_cache = {}
 _system_icon_cache = {}
-_default_browser_icon = None
+_default_browser_icon = {}  # サイズごとにキャッシュ
 
 # --- ヘルパー関数 ---
 def get_work_area():
@@ -363,8 +363,9 @@ def get_web_icon(url, size=16):
 
     if not url:
         # URLが無効な場合は、デフォルトブラウザアイコンを返すしかない
-        if _default_browser_icon is None: _default_browser_icon = _get_or_create_default_browser_icon(size)
-        return _default_browser_icon
+        if size not in _default_browser_icon:
+            _default_browser_icon[size] = _get_or_create_default_browser_icon(size)
+        return _default_browser_icon[size]
 
     domain = urlparse(url).netloc
     key = (domain, size)
@@ -419,8 +420,9 @@ def get_web_icon(url, size=16):
 
     # 3. 最終フォールバック
     if tk_icon is None:
-        if _default_browser_icon is None: _default_browser_icon = _get_or_create_default_browser_icon(size)
-        tk_icon = _default_browser_icon
+        if size not in _default_browser_icon:
+            _default_browser_icon[size] = _get_or_create_default_browser_icon(size)
+        tk_icon = _default_browser_icon[size]
 
     _icon_cache[key] = tk_icon
     return tk_icon
@@ -433,14 +435,11 @@ def _get_or_create_default_browser_icon(size=16):
         with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, rf"{prog_id}\shell\open\command") as key:
             cmd_path = winreg.QueryValueEx(key, "")[0]
         browser_path = cmd_path.split('"')[1]
-        
         if os.path.exists(browser_path):
             return get_file_icon(browser_path, size)
         else:
-            # パスはあるがファイルがない異常事態
             return get_system_warning_icon(size)
     except Exception:
-        # レジストリ検索失敗など
         return get_system_warning_icon(size)
     
 # --- GUIクラス ---
