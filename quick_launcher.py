@@ -21,7 +21,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
 # --- アプリケーション設定 ---
-logging.basicConfig(filename='app_errors.log', level=logging.WARNING,
+logging.basicConfig(filename='app_errors.log', level=logging.DEBUG,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 if getattr(sys, 'frozen', False):
@@ -103,6 +103,37 @@ def get_work_area():
         screen_h = user32.GetSystemMetrics(1) # SM_CYSCREEN
         return 0, 0, screen_w, screen_h
 
+def lighten_color(hex_color, amount=0.4):
+    """
+    16進数の色コードを指定された量だけ明るくする。
+    amount: 0.0 (元の色) から 1.0 (白) までの値。
+    """
+    try:
+        # '#'を削除し、RGBの各値を取得
+        hex_color = hex_color.lstrip('#')
+        r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        
+        # 各色成分を白に近づける
+        # (255 - 元の色) * amount で白までの距離の何割進むかを計算
+        r = int(r + (255 - r) * amount)
+        g = int(g + (255 - g) * amount)
+        b = int(b + (255 - b) * amount)
+        
+        # 0-255の範囲に収める
+        r = max(0, min(255, r))
+        g = max(0, min(255, g))
+        b = max(0, min(255, b))
+        
+        # 新しい色を16進数コードで返す
+        return f'#{r:02x}{g:02x}{b:02x}'
+    except Exception:
+        # 解析に失敗した場合は、フォールバックとしてグレーを返す
+        return "#a0a0a0"
+
+def round_to_step(value, step=4):
+    """数値を指定されたステップに丸める（例: 15をstep=4で16に）"""
+    return step * round(value / step)
+
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -169,48 +200,52 @@ def _create_fallback_icon(size=20):
 def _hicon_to_photoimage(hIcon, size, destroy_after=True):
     """
     アイコンハンドル(HICON)をTkinter PhotoImageに変換する。
-    リソース解放のタイミングを修正した最終確定版。
+    どんなサイズのHICONでも、要求されたsizeで正しく描画・変換する。
     """
-    icon_info = ICONINFO()
-    if not user32.GetIconInfo(hIcon, ctypes.byref(icon_info)):
-        if destroy_after: user32.DestroyIcon(hIcon)
-        return None
-
-    hBitmap = icon_info.hbmColor
-    if not hBitmap:
-        if destroy_after: user32.DestroyIcon(hIcon)
-        return None
-
-    # --- ここからが画像データ抽出の本番 ---
     tk_icon = None
-    try:
-        bitmap = BITMAP()
-        gdi32.GetObjectW(hBitmap, ctypes.sizeof(bitmap), ctypes.byref(bitmap))
-        width, height = bitmap.bmWidth, bitmap.bmHeight
+    hdc = user32.GetDC(None)
+    mem_dc = gdi32.CreateCompatibleDC(hdc)
+    # ★★★修正点1: 作成するビットマップのサイズを、元のアイコンサイズではなく、
+    #             目標の `size` にする。
+    mem_bmp = gdi32.CreateCompatibleBitmap(hdc, size, size)
+    gdi32.SelectObject(mem_dc, mem_bmp)
 
-        hdc = user32.GetDC(None)
-        mem_dc = gdi32.CreateCompatibleDC(hdc)
-        mem_bmp = gdi32.CreateCompatibleBitmap(hdc, width, height)
-        gdi32.SelectObject(mem_dc, mem_bmp)
-        user32.DrawIconEx(mem_dc, 0, 0, hIcon, width, height, 0, None, 3) # DI_NORMAL
-        
-        bmp_str = ctypes.create_string_buffer(width * height * 4)
+    try:
+        # 背景を透明にするための準備（マゼンタで塗りつぶし）
+        # この手法により、アルファチャンネルがないアイコンでも透過背景で描画できる
+        brush = gdi32.CreateSolidBrush(0x00FF00FF) # BGR形式のマゼンタ
+        rect_fill = RECT(0, 0, size, size)
+        user32.FillRect(mem_dc, ctypes.byref(rect_fill), brush)
+        gdi32.DeleteObject(brush)
+
+        user32.DrawIconEx(mem_dc, 0, 0, hIcon, size, size, 0, None, 3)
+
+        # メモリDCからビットマップデータを取得
+        bmp_str = ctypes.create_string_buffer(size * size * 4)
         gdi32.GetBitmapBits(mem_bmp, len(bmp_str), bmp_str)
+
+        # Pillow Imageに変換
+        img = Image.frombuffer("RGBA", (size, size), bmp_str, "raw", "BGRA", 0, 1)
+
+        # マゼンタの背景を透過に変換
+        img = img.convert("RGBA")
+        datas = img.getdata()
+        new_data = []
+        for item in datas:
+            # itemは (R, G, B, A)
+            if item[0] == 255 and item[1] == 0 and item[2] == 255:
+                new_data.append((255, 255, 255, 0)) # 透明ピクセル
+            else:
+                new_data.append(item)
+        img.putdata(new_data)
         
-        img = Image.frombuffer("RGBA", (width, height), bmp_str, "raw", "BGRA", 0, 1)
+        tk_icon = ImageTk.PhotoImage(img)
         
-        # ★★★ PhotoImageを先に完全に作成する ★★★
-        tk_icon = ImageTk.PhotoImage(img.resize((size, size), Image.LANCZOS))
-        
-        # リソース解放
+    finally:
+        # リソースの解放
         gdi32.DeleteObject(mem_bmp)
         gdi32.DeleteDC(mem_dc)
         user32.ReleaseDC(None, hdc)
-    
-    finally:
-        # GDIオブジェクトと、必要であればアイコンハンドルを解放
-        if hBitmap: gdi32.DeleteObject(hBitmap)
-        if icon_info.hbmMask: gdi32.DeleteObject(icon_info.hbmMask)
         if destroy_after:
             user32.DestroyIcon(hIcon)
             
@@ -285,18 +320,37 @@ def get_system_warning_icon(size=16):
 def get_file_icon(path, size=16):
     """ファイルパスからアイコンを取得する。パスが存在しない場合は警告アイコンを返す。"""
 
-    key = (path, size)
+    # サイズに応じたフラグを決定する
+    # SHGFI_ICON (0x100) は必須
+    # SHGFI_LARGEICON (0x0) は大きいアイコン(通常32x32)
+    # SHGFI_SMALLICON (0x1) は小さいアイコン(通常16x16)
+    if size > 20: # 閾値。20pxより大きいサイズを要求されたら大きいアイコンを取得
+        flags = 0x100 | 0x0 # SHGFI_ICON | SHGFI_LARGEICON
+    else:
+        flags = 0x100 | 0x1 # SHGFI_ICON | SHGFI_SMALLICON
+
+    key = (path, size, flags)
     # まず、キャッシュを確認
     if key in _icon_cache:
         return _icon_cache[key]
+    
     # ファイル/フォルダの存在を確認
     if not os.path.exists(path):
         warn_icon = get_system_warning_icon(size)
-        _icon_cache[key] = warn_icon  # 無効パスもキャッシュ
+        _icon_cache[key] = warn_icon  # (path, size, flags) でキャッシュ
         return warn_icon
+    
     info = SHFILEINFO()
-    res = shell32.SHGetFileInfoW(path, 0, ctypes.byref(info), ctypes.sizeof(info), 0x100 | 0x1)
-    tk_icon = _hicon_to_photoimage(info.hIcon, size) if res and info.hIcon else get_system_folder_icon(size)
+    res = shell32.SHGetFileInfoW(path, 0, ctypes.byref(info), ctypes.sizeof(info), flags)
+    
+    if res and info.hIcon:
+        # 取得したアイコンハンドルを適切なサイズに変換
+        # _hicon_to_photoimage は DestroyIcon を内部で呼ぶのでハンドルはここで破棄不要
+        tk_icon = _hicon_to_photoimage(info.hIcon, size)
+    else:
+        # 取得失敗時はフォルダアイコンで代用
+        tk_icon = get_system_folder_icon(size)
+
     _icon_cache[key] = tk_icon
     return tk_icon
 
@@ -508,8 +562,6 @@ class SettingsDialog(simpledialog.Dialog):
 
 # --- リンク編集画面 ---
 class LinksEditDialog(tk.Toplevel):
-    LINK_ICON_SIZE = 16  # 18→16に統一
-    LINK_ROW_HEIGHT = 24
 
     def __init__(self, parent, groups, settings):
         super().__init__(parent)
@@ -524,10 +576,16 @@ class LinksEditDialog(tk.Toplevel):
 
         self.groups = [dict(group) for group in groups]
         self.settings = settings
+        self.link_row_height = 24 # デフォルト値
+        self.link_icon_size = 16 # デフォルト値
         self.selected_group = 0
         self.selected_link = None
         self.icon_refs = []
         self.result = None
+        self.modified = False  # 変更フラグ
+
+        # ウィンドウクローズ時のハンドラ
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
 
         self.resizable(True, True)
         self.minsize(600, 400)
@@ -613,8 +671,9 @@ class LinksEditDialog(tk.Toplevel):
         tk.Button(button_frame, text="OK", width=10, command=self.ok).pack(side="left", padx=5)
         tk.Button(button_frame, text="キャンセル", width=10, command=self.cancel).pack(side="left")
 
-        self.bind("<Return>", self.ok)
+        self.link_addr_entry.bind("<Return>", lambda e: self.save_link_addr())
         self.bind("<Escape>", self.cancel)
+        self.bind("<Alt-F4>", self.cancel)
 
         # --- 初期化と表示処理 ---
         self.refresh_group_list()
@@ -659,6 +718,9 @@ class LinksEditDialog(tk.Toplevel):
         self.destroy()
 
     def cancel(self, event=None):
+        if self.modified:
+            if not messagebox.askyesno("確認", "変更内容が保存されていません。破棄して閉じますか？", parent=self):
+                return
         self.result = None
         self.destroy()
 
@@ -669,6 +731,7 @@ class LinksEditDialog(tk.Toplevel):
             self.selected_group = len(self.groups) - 1
             self.refresh_group_list()
             self.refresh_link_list()
+            self.modified = True
 
     def rename_group(self):
         if not self.groups:
@@ -678,6 +741,7 @@ class LinksEditDialog(tk.Toplevel):
         if new_name:
             self.groups[idx]['group'] = new_name
             self.refresh_group_list()
+            self.modified = True
 
     def delete_group(self):
         if not self.groups:
@@ -687,6 +751,7 @@ class LinksEditDialog(tk.Toplevel):
         self.selected_group = max(0, self.selected_group - 1)
         self.refresh_group_list()
         self.refresh_link_list()
+        self.modified = True
 
     def move_group_up(self):
         idx = self.selected_group
@@ -694,6 +759,7 @@ class LinksEditDialog(tk.Toplevel):
             self.groups[idx-1], self.groups[idx] = self.groups[idx], self.groups[idx-1]
             self.selected_group -= 1
             self.refresh_group_list()
+            self.modified = True
 
     def move_group_down(self):
         idx = self.selected_group
@@ -701,6 +767,7 @@ class LinksEditDialog(tk.Toplevel):
             self.groups[idx+1], self.groups[idx] = self.groups[idx], self.groups[idx+1]
             self.selected_group += 1
             self.refresh_group_list()
+            self.modified = True
 
     def add_link(self):
         if not self.groups:
@@ -715,12 +782,13 @@ class LinksEditDialog(tk.Toplevel):
             # --- 追加したリンクのアイコンを個別にキャッシュ取得 ---
             try:
                 if path.startswith('http'):
-                    get_web_icon(path, size=16)
+                    get_web_icon(path, size=self.link_icon_size)
                 else:
-                    get_file_icon(path, size=16)
+                    get_file_icon(path, size=self.link_icon_size)
             except Exception as e:
-                logging.info(f"[add_link] icon fetch failed: {path} (16px): {e}")
+                logging.info(f"[add_link] icon fetch failed: {path} : {e}")
             self.refresh_link_list()
+            self.modified = True
 
     def rename_link(self):
         if not self.groups or self.selected_link is None:
@@ -731,6 +799,7 @@ class LinksEditDialog(tk.Toplevel):
         if new_name:
             links[idx]['name'] = new_name
             self.refresh_link_list()
+            self.modified = True
 
     def delete_link(self):
         if not self.groups or self.selected_link is None:
@@ -739,6 +808,7 @@ class LinksEditDialog(tk.Toplevel):
         del links[self.selected_link]
         self.selected_link = None
         self.refresh_link_list()
+        self.modified = True
 
     def move_link_up(self):
         if not self.groups or self.selected_link is None or self.selected_link == 0:
@@ -748,6 +818,7 @@ class LinksEditDialog(tk.Toplevel):
         links[i-1], links[i] = links[i], links[i-1]
         self.selected_link -= 1
         self.refresh_link_list()
+        self.modified = True
 
     def move_link_down(self):
         if not self.groups or self.selected_link is None:
@@ -759,20 +830,27 @@ class LinksEditDialog(tk.Toplevel):
         links[i+1], links[i] = links[i], links[i+1]
         self.selected_link += 1
         self.refresh_link_list()
+        self.modified = True
 
     def refresh_link_list(self):
         self.link_canvas.delete("all")
         self.icon_refs.clear()
         # self.canvas_item_map.clear()
 
-        font_name = (self.settings['font'], self.settings['size'])
-        font_path = (self.settings['font'], self.settings['size'])
+        font_name_tuple = (self.settings['font'], self.settings['size'])
+        font_path_tuple = (self.settings['font'], self.settings['size'])
         color_path = "#888888"
 
-        # テキスト幅計算用にフォントオブジェクトを取得
-        name_font_obj = tkfont.Font(font=font_name)
+        name_font_obj = tkfont.Font(font=font_name_tuple)
+        font_metrics = name_font_obj.metrics()
+        font_height = font_metrics.get('linespace', font_metrics.get('height', 16))
+        padding = 8
+        self.link_row_height = font_height + padding
 
-        # 選択グループがなければ何も表示しない
+        self.link_icon_size = font_metrics.get('ascent', 16)
+        self.link_icon_size = round_to_step(self.link_icon_size, step=4)
+        self.link_icon_size = max(12, min(self.link_icon_size, 32))
+
         if not self.groups or self.selected_group is None or self.selected_group >= len(self.groups):
             self.link_addr_entry.config(state="disabled")
             self.save_addr_btn.config(state="disabled")
@@ -780,52 +858,40 @@ class LinksEditDialog(tk.Toplevel):
             return
         links = self.groups[self.selected_group]['links']
         y = 2
-        # --- Canvasの幅を取得してテキスト描画幅を調整 ---
         canvas_width = self.link_canvas.winfo_width() or 360
         for i, link in enumerate(links):
             path = link['path']
             icon = None
             if path.startswith('http'):
                 domain = urlparse(path).netloc
-                key = (domain, self.LINK_ICON_SIZE)
+                key = (domain, self.link_icon_size)
                 icon = _icon_cache.get(key)
             else:
-                key = (path, self.LINK_ICON_SIZE)
+                if self.link_icon_size > 20:
+                    flags = 0x100 | 0x0
+                else:
+                    flags = 0x100 | 0x1
+                key = (path, self.link_icon_size, flags)
                 icon = _icon_cache.get(key)
             if not icon:
-                icon = _create_fallback_icon(self.LINK_ICON_SIZE)
+                icon = _create_fallback_icon(self.link_icon_size)
             if icon:
-                self.link_canvas.create_image(8, y + self.LINK_ROW_HEIGHT // 2, image=icon, anchor="w")
+                self.link_canvas.create_image(4, y + self.link_row_height // 2, image=icon, anchor="w")
                 self.icon_refs.append(icon)
-            # 選択枠
+            # アイコンの右側余白を1px、左側を4pxに
+            name_x_start = 4 + self.link_icon_size + 1
+            # 省略せずフルテキストで表示
+            display_name = link['name']
             if self.selected_link == i:
-                self.link_canvas.create_rectangle(0, y, canvas_width, y+self.LINK_ROW_HEIGHT, outline="#3399ff", width=2)
-            
-            # 1. リンク名を描画し、その幅を取得
-            name_x_start = 32
-            name_id = self.link_canvas.create_text(name_x_start, y + self.LINK_ROW_HEIGHT // 2,
-                                                   text=link['name'], anchor="w", font=font_name)
-            
-            # 2. 描画したリンク名の実際の幅を計算
-            # name_font_obj.measure() を使うことで、表示されるテキストのピクセル幅がわかる
-            name_width = name_font_obj.measure(link['name'])
-            
-            # 3. パスの描画開始位置を計算
-            path_x_start = name_x_start + name_width + 25 # リンク名の右端 + 25pxのスペース
-
-            # 4. パスを描画
-            path_id = self.link_canvas.create_text(path_x_start, y + self.LINK_ROW_HEIGHT // 2,
-                                                   text=path, anchor="w", font=font_path, fill=color_path)
-            
-            # # 5. ★重要: 描画したアイテムのIDとパスをマップに登録
-            # #    これにより、後でマウスが乗った時にどのパスか判定できる
-            # self.canvas_item_map[name_id] = path
-            # self.canvas_item_map[path_id] = path
-
-            y += self.LINK_ROW_HEIGHT
-
+                self.link_canvas.create_rectangle(0, y, canvas_width, y+self.link_row_height, outline="#3399ff", width=2)
+            name_id = self.link_canvas.create_text(name_x_start, y + self.link_row_height // 2,
+                                                   text=display_name, anchor="w", font=font_name_tuple)
+            name_width = name_font_obj.measure(display_name)
+            path_x_start = name_x_start + name_width + 25
+            path_id = self.link_canvas.create_text(path_x_start, y + self.link_row_height // 2,
+                                                   text=link['path'], anchor="w", font=font_path_tuple, fill=color_path)
+            y += self.link_row_height
         self.link_canvas.config(scrollregion=(0,0,canvas_width,y))
-        # 選択リンクがあれば編集可、なければ不可
         if self.selected_link is not None and 0 <= self.selected_link < len(links):
             self.link_addr_entry.config(state="normal")
             self.save_addr_btn.config(state="normal")
@@ -853,7 +919,7 @@ class LinksEditDialog(tk.Toplevel):
             self.link_canvas.config(state="normal")
 
     def on_link_canvas_click(self, event):
-        idx = (event.y - 2) // self.LINK_ROW_HEIGHT
+        idx = (event.y - 2) // self.link_row_height
         links = self.groups[self.selected_group]['links']
         if 0 <= idx < len(links):
             self.selected_link = idx
@@ -863,7 +929,7 @@ class LinksEditDialog(tk.Toplevel):
         self.refresh_link_list()
 
     def on_link_canvas_double(self, event):
-        idx = (event.y - 2) // self.LINK_ROW_HEIGHT
+        idx = (event.y - 2) // self.link_row_height
         links = self.groups[self.selected_group]['links']
         if 0 <= idx < len(links):
             path = links[idx]['path']
@@ -878,18 +944,19 @@ class LinksEditDialog(tk.Toplevel):
         links[self.selected_link]['path'] = new_path
         # キャッシュクリア（旧パス・新パス両方）
         for p in (old_path, new_path):
-            key = (p, self.LINK_ICON_SIZE)
+            key = (p, self.link_icon_size)
             if key in _icon_cache:
                 del _icon_cache[key]
         # 新しいパスのアイコンを取得
         try:
             if new_path.startswith('http'):
-                get_web_icon(new_path, size=self.LINK_ICON_SIZE)
+                get_web_icon(new_path, size=self.link_icon_size)
             else:
-                get_file_icon(new_path, size=self.LINK_ICON_SIZE)
+                get_file_icon(new_path, size=self.link_icon_size)
         except Exception as e:
-            logging.info(f"[save_link_addr] icon fetch failed: {new_path} ({self.LINK_ICON_SIZE}px): {e}")
+            logging.info(f"[save_link_addr] icon fetch failed: {new_path} ({self.link_icon_size}px): {e}")
         self.refresh_link_list()
+        self.modified = True
 
     def on_link_addr_focus(self, event):
         self.link_addr_entry.icursor(tk.END)
@@ -967,9 +1034,7 @@ class LinksEditDialog(tk.Toplevel):
 
 class LinkPopup(tk.Toplevel):
     # --- レイアウト定数 ---
-    GROUP_ROW_HEIGHT = 24
-    ICON_SIZE = 16  # 16pxに統一
-    ICON_COLUMN_WIDTH = 24  # アイコンを描画する領域の幅 (アイコンサイズ + 余白)
+    # ICON_COLUMN_WIDTH = 24  # ←固定値を廃止
     TEXT_LEFT_PADDING = 0   # アイコンとテキストの間の隙間
     
     def __init__(self, master, settings):
@@ -977,6 +1042,8 @@ class LinkPopup(tk.Toplevel):
         if app_icon:
             self.iconphoto(True, app_icon)
         self.settings = settings.copy()
+        self.group_row_height = 24 # デフォルト値
+        self.icon_size = 16 # デフォルト値
         self.overrideredirect(True)
         self.withdraw()
         self.bind("<FocusOut>", lambda e: self.withdraw())
@@ -990,7 +1057,9 @@ class LinkPopup(tk.Toplevel):
         self.hover_group = None
         self.link_popup = None
         self._leave_after_id = None
-        self.folder_icon = get_system_folder_icon(size=16)
+        #self.folder_icon = get_system_folder_icon(size=16)
+        self.folder_icon = None
+        self.arrow_icon = None
         
         self.reload_links()
         self.apply_settings(self.settings)
@@ -1001,6 +1070,18 @@ class LinkPopup(tk.Toplevel):
         content_bg_color = self.settings.get('bg', DEFAULT_SETTINGS['bg'])
         self.config(bg=border_color)
         self.canvas.config(bg=content_bg_color)
+
+        font_main = tkfont.Font(family=self.settings['font'], size=self.settings['size'])
+        font_metrics = font_main.metrics()
+        font_height = font_metrics.get('linespace', font_metrics.get('height', 16))
+        padding = 4  # 上下の余白（合計）
+        self.group_row_height = font_height + padding
+
+        self.icon_size = font_metrics.get('ascent', 16)
+        self.icon_size = round_to_step(self.icon_size, step=4)
+        self.icon_size = max(12, min(self.icon_size, 32))
+        self.ICON_COLUMN_WIDTH = self.icon_size + 5  # 左4px+アイコン+右1px
+        self.folder_icon = get_system_folder_icon(size=self.icon_size)
         self.draw_list()
 
     def reload_links(self):
@@ -1077,35 +1158,58 @@ class LinkPopup(tk.Toplevel):
     def draw_list(self):
         self.canvas.delete("all")
         self.canvas.image_refs = [] 
-        
+        RIGHT_PADDING = 15 
+        ARROW_AREA_WIDTH = 20
         font_main = (self.settings['font'], self.settings['size'])
         font_metrics = tkfont.Font(font=font_main)
-        maxlen = max((font_metrics.measure(g) for g in self.group_map), default=0)
-        
-        # --- 定数を使った計算 ---
-        canvas_w = min(max(self.ICON_COLUMN_WIDTH + self.TEXT_LEFT_PADDING + maxlen, 120), 400)
-        canvas_h = len(self.group_map) * self.GROUP_ROW_HEIGHT
+        max_group_width = 220  # グループ名の最大幅(px)
+        # --- ここでarrow_char/font_arrowを定義 ---
+        try:
+            arrow_font_size = max(8, self.icon_size - 2)
+            font_arrow = tkfont.Font(family='Marlett', size=arrow_font_size)
+            arrow_char = '4'
+        except tk.TclError:
+            font_arrow = font_metrics
+            arrow_char = '>'
+        maxlen = max((min(font_metrics.measure(g), max_group_width) for g in self.group_map), default=0)
+        canvas_w = min(max(self.ICON_COLUMN_WIDTH + self.TEXT_LEFT_PADDING + maxlen + RIGHT_PADDING, 120), 400)
+        canvas_h = len(self.group_map) * self.group_row_height
         self.canvas.config(width=canvas_w, height=canvas_h)
-        
+        main_font_color = self.settings['font_color']
+        arrow_color = lighten_color(main_font_color, amount=0.6)
         y = 0
         for i, group in enumerate(self.group_map):
             bg_color = "#eaf6ff" if self.hover_group == i else self.settings['bg']
-            self.canvas.create_rectangle(0, y, canvas_w, y + self.GROUP_ROW_HEIGHT, fill=bg_color, outline="")
-            
+            self.canvas.create_rectangle(0, y, canvas_w, y + self.group_row_height, fill=bg_color, outline="")
             if self.folder_icon:
-                # アイコンをアイコン領域の中央に配置
-                icon_x = self.ICON_COLUMN_WIDTH // 2
-                self.canvas.create_image(icon_x, y + self.GROUP_ROW_HEIGHT // 2, image=self.folder_icon, anchor="center")
+                icon_x = 4 + self.icon_size // 2
+                self.canvas.create_image(icon_x, y + self.group_row_height  // 2, image=self.folder_icon, anchor="center")
                 self.canvas.image_refs.append(self.folder_icon)
-            
-            # テキストの位置を定数から計算
-            text_x = self.ICON_COLUMN_WIDTH + self.TEXT_LEFT_PADDING
-            self.canvas.create_text(text_x, y + self.GROUP_ROW_HEIGHT // 2, text=group, anchor="w", font=font_main, fill=self.settings['font_color'])
-            
-            y += self.GROUP_ROW_HEIGHT
+            # グループ名を省略表示
+            display_group = ellipsize_text(group, font_metrics, max_group_width)
+            self.canvas.create_text(
+                self.ICON_COLUMN_WIDTH + self.TEXT_LEFT_PADDING + 1, 
+                y + self.group_row_height  // 2, 
+                text=display_group, 
+                anchor="w", 
+                font=font_main, 
+                fill=main_font_color
+            )
+            if self.link_items.get(group):
+                arrow_x = canvas_w - (ARROW_AREA_WIDTH // 2)
+                self.canvas.create_text(
+                    arrow_x, 
+                    y + self.group_row_height  // 2, 
+                    text=arrow_char, 
+                    anchor="center", 
+                    font=font_arrow, 
+                    fill=arrow_color
+                )
+            y += self.group_row_height
         
+
     def on_motion(self, event):
-        row_h = self.GROUP_ROW_HEIGHT
+        row_h = self.group_row_height 
         hover = event.y // row_h if 0 <= event.y < len(self.group_map) * row_h else None
         if hover != self.hover_group:
             self.hover_group = hover
@@ -1148,52 +1252,46 @@ class LinkPopup(tk.Toplevel):
 
         font_link = (self.settings['font'], self.settings['size'])
         font_underline = tkfont.Font(font=font_link); font_underline.config(underline=True)
+        font_link_obj = tkfont.Font(font=font_link)
+        max_link_width = 320  # リンク名の最大幅(px)
         popup.icon_refs = []
 
-        # --- forループ内をgridを使うように変更 ---
         for i, link in enumerate(links):
-            # 各行のコンテナとなるFrame
             row = tk.Frame(frame, bg=self.settings['bg'])
-            row.grid(row=i, column=0, sticky="ew") # gridで行を管理
-            frame.grid_columnconfigure(0, weight=1) # 幅を広げる設定
-
-            # gridでカラムの幅を設定
+            row.grid(row=i, column=0, sticky="ew")
+            frame.grid_columnconfigure(0, weight=1)
             row.grid_columnconfigure(0, minsize=self.ICON_COLUMN_WIDTH)
             row.grid_columnconfigure(1, weight=1)
-
-            # アイコンの取得
             path = link['path']
-            icon = None
             if path.startswith('http'):
                 domain = urlparse(path).netloc
-                key = (domain, self.ICON_SIZE)
+                key = (domain, self.icon_size)
                 icon = _icon_cache.get(key)
+                if not icon:
+                    icon = _create_fallback_icon(self.icon_size)
             else:
-                key = (path, self.ICON_SIZE)
+                if self.icon_size > 20:
+                    flags = 0x100 | 0x0
+                else:
+                    flags = 0x100 | 0x1
+                key = (path, self.icon_size, flags)
                 icon = _icon_cache.get(key)
-            if not icon:
-                icon = _create_fallback_icon(self.ICON_SIZE)
-            
+                if not icon:
+                    icon = _create_fallback_icon(self.icon_size)
             icon_label = tk.Label(row, image=icon, bg=self.settings['bg'])
-            # gridで配置 (column 0)
-            icon_label.grid(row=0, column=0, sticky="e", padx=(0, self.TEXT_LEFT_PADDING))
+            icon_label.grid(row=0, column=0, sticky="nse", padx=(0, self.TEXT_LEFT_PADDING))
             popup.icon_refs.append(icon)
-            
-            text_label = tk.Label(row, text=link['name'], anchor="w", bg=self.settings['bg'], font=font_link, fg=self.settings['font_color'])
-            # gridで配置 (column 1)
+            # リンク名を省略表示
+            display_name = ellipsize_text(link['name'], font_link_obj, max_link_width)
+            text_label = tk.Label(row, text=display_name, anchor="w", bg=self.settings['bg'], font=font_link, fg=self.settings['font_color'])
             text_label.grid(row=0, column=1, sticky="w")
-            
             def on_enter(e, lbl=text_label): lbl.config(font=font_underline)
             def on_leave(e, lbl=text_label): lbl.config(font=font_link)
             def on_click(e, p=path): self.open_and_close(p)
-            
             for w in [row, icon_label, text_label]:
                 w.bind("<Enter>", on_enter); w.bind("<Leave>", on_leave); w.bind("<Button-1>", on_click)
-
-        self.update_idletasks() # 親ウィンドウの位置・サイズを確定させる
-        popup.update_idletasks() # サブポップアップのサイズを計算させる
-
-        # --- ここからが座標調整ロジック ---
+        self.update_idletasks()
+        popup.update_idletasks()
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
         parent_x = self.winfo_rootx()
@@ -1201,24 +1299,14 @@ class LinkPopup(tk.Toplevel):
         parent_w = self.winfo_width()
         popup_w = popup.winfo_width()
         popup_h = popup.winfo_height()
-
-        # 理想の表示座標を計算 (親ウィンドウの右側)
         x = parent_x + parent_w
-        y = parent_y + group_idx * self.GROUP_ROW_HEIGHT
-
-        # X座標の調整 (画面右端にはみ出す場合)
+        y = parent_y + group_idx * self.group_row_height 
         if x + popup_w > screen_w:
-            # 親ウィンドウの左側に表示位置を変更
             x = parent_x - popup_w
-        
-        # Y座標の調整 (画面下端にはみ出す場合)
         if y + popup_h > screen_h:
-            # はみ出した分だけ上にずらす
             y = screen_h - popup_h - 5
         if y < 0:
             y = 5
-        # --- ここまでが座標調整ロジック ---
-
         popup.geometry(f"+{x}+{y}")
         self.link_popup = popup
         popup.bind("<Leave>", lambda e: self._on_link_popup_leave())
@@ -1234,8 +1322,31 @@ class LinkPopup(tk.Toplevel):
                     win.winfo_rooty() <= y < win.winfo_rooty() + win.winfo_height())
         except tk.TclError: return False
 
+def ellipsize_text(text, font_obj, max_width):
+    if font_obj.measure(text) <= max_width:
+        return text
+    for i in range(len(text), 0, -1):
+        s = text[:i] + '...'
+        if font_obj.measure(s) <= max_width:
+            return s
+    return '...'
+
 # --- アプリケーション実行部 ---
 def main():
+    try:
+        # Windows 8.1以降で推奨されるPer-Monitor V2 DPI Awarenessを試す
+        # PROCESS_PER_MONITOR_DPI_AWARE = 2
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        logging.info("SetProcessDpiAwareness(2) succeeded.")
+    except (AttributeError, OSError):
+        # shcore.dllがない古いWindows (7, 8) 向けにフォールバック
+        try:
+            # System-wide DPI Awarenessを有効にする
+            user32.SetProcessDPIAware()
+            logging.info("SetProcessDPIAware() succeeded.")
+        except (AttributeError, OSError):
+            logging.warning("Failed to set DPI awareness.")
+
     global root, popup, settings, app_icon
     settings = load_settings()
 
@@ -1248,7 +1359,9 @@ def main():
             def show_popup_action(icon=None): root.after(0, popup.show)
             def edit_links_action(icon=None): root.after(0, open_links_editor)
             def settings_action(icon=None): root.after(0, open_settings_dialog)
-            def exit_action(icon=None): icon.stop()
+            def exit_action(icon=None):
+                icon.stop()
+                root.after(0, root.quit)
 
             menu = Menu(item('リンクを表示', show_popup_action, default=True), item('リンク編集', edit_links_action),
                         item('設定', settings_action), Menu.SEPARATOR, item('終了', exit_action))
@@ -1286,20 +1399,21 @@ def main():
     def preload_all_link_icons():
         try:
             links_data = load_links_data()
+            preload_sizes = [8, 12, 16, 20, 24, 28, 32]
             for group in links_data:
                 for link in group.get('links', []):
                     path = link.get('path', '')
-                    size = 16  # 16pxに統一
-                    if path.startswith('http'):
-                        try:
-                            get_web_icon(path, size=size)
-                        except Exception as e:
-                            logging.info(f"[preload] get_web_icon failed: {path} ({size}px): {e}")
-                    else:
-                        try:
-                            get_file_icon(path, size=size)
-                        except Exception as e:
-                            logging.info(f"[preload] get_file_icon failed: {path} ({size}px): {e}")
+                    for size in preload_sizes:
+                        if path.startswith('http'):
+                            try:
+                                get_web_icon(path, size=size)
+                            except Exception as e:
+                                logging.info(f"[preload] get_web_icon failed: {path} ({size}px): {e}")
+                        else:
+                            try:
+                                get_file_icon(path, size=size)
+                            except Exception as e:
+                                logging.info(f"[preload] get_file_icon failed: {path} ({size}px): {e}")
         except Exception as e:
             logging.warning(f"[preload] preload_all_link_icons failed: {e}")
     threading.Thread(target=preload_all_link_icons, daemon=True).start()
