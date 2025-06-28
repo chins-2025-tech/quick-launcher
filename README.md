@@ -35,9 +35,7 @@ Windows用クイックランチャー（Python/Tkinter）
 ## ビルド（PyInstaller）
 
 ```sh
-# まずPNG→ICO変換（例: Windowsのペイントやオンラインツール等で変換）
-# 変換後、icon.ico を同じフォルダに置く
-pyinstaller quick_launcher.py --noconsole --icon=icon.ico
+pyinstaller --noconsole --onefile --icon=icon.ico --add-data "icon.png;." quick_launcher.py
 ```
 
 - 実行ファイル（exe）と同じフォルダに `icon.png` を配置すると、
