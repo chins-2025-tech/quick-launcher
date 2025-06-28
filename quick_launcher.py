@@ -771,23 +771,42 @@ class LinksEditDialog(tk.Toplevel):
     def add_link(self):
         if not self.groups:
             return
-        name = simpledialog.askstring("リンク名", "新しいリンク名:", parent=self)
-        if not name:
+        # クリップボードからデフォルト値取得
+        clipboard_text = None
+        try:
+            clipboard_text = self.clipboard_get()
+        except Exception:
+            clipboard_text = None
+        default_name = ""
+        default_path = ""
+        if isinstance(clipboard_text, str):
+            text = clipboard_text.strip()
+            if text.startswith("http://") or text.startswith("https://"):
+                default_name = ""
+                default_path = text
+            else:
+                base = os.path.basename(text)
+                default_name = base
+                default_path = text
+        # それ以外（テキストでない場合）はデフォルト空
+        name = simpledialog.askstring("リンク名", "新しいリンク名:", initialvalue=default_name, parent=self)
+        if not name:  # Noneまたは空文字列
             return
-        path = self.ask_dialog(self, "リンク先", "リンク先パスまたはURL:")
-        if name and path:
-            self.groups[self.selected_group]['links'].append({'name': name, 'path': path})
-            self.selected_link = len(self.groups[self.selected_group]['links'])-1
-            # --- 追加したリンクのアイコンを個別にキャッシュ取得 ---
-            try:
-                if path.startswith('http'):
-                    get_web_icon(path, size=self.link_icon_size)
-                else:
-                    get_file_icon(path, size=self.link_icon_size)
-            except Exception as e:
-                logging.info(f"[add_link] icon fetch failed: {path} : {e}")
-            self.refresh_link_list()
-            self.modified = True
+        path = self.ask_dialog(self, "リンク先", "リンク先パスまたはURL:", initialvalue=default_path)
+        if not path:  # Noneまたは空文字列
+            return
+        self.groups[self.selected_group]['links'].append({'name': name, 'path': path})
+        self.selected_link = len(self.groups[self.selected_group]['links'])-1
+        # --- 追加したリンクのアイコンを個別にキャッシュ取得 ---
+        try:
+            if path.startswith('http'):
+                get_web_icon(path, size=self.link_icon_size)
+            else:
+                get_file_icon(path, size=self.link_icon_size)
+        except Exception as e:
+            logging.info(f"[add_link] icon fetch failed: {path} : {e}")
+        self.refresh_link_list()
+        self.modified = True
 
     def rename_link(self):
         if not self.groups or self.selected_link is None:
