@@ -29,5 +29,4 @@ app_errors.log
 
 # PyInstaller生成物
 build/
-dist/
 *.spec
