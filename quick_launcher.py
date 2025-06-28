@@ -269,22 +269,35 @@ def get_system_folder_icon(size=16):
     info = SHFILEINFO()
     flags = SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES
     
-    # ダミーのフォルダ属性で、Windowsに標準のフォルダアイコンを要求する
-    res = shell32.SHGetFileInfoW(
-        "dummy_folder",
-        FILE_ATTRIBUTE_DIRECTORY,
-        ctypes.byref(info),
-        ctypes.sizeof(info),
-        flags
-    )
-    
+    # まず実在するディレクトリ（C:\\Windows）で取得を試みる
     tk_icon = None
-    if res and info.hIcon:
-        # 修正済みのヘルパー関数を呼び出す
-        # SHGetFileInfoWで取得したハンドルは破棄する必要がある (destroy_after=True)
-        tk_icon = _hicon_to_photoimage(info.hIcon, size, destroy_after=True)
-
-    # 取得に失敗した場合のフォールバック
+    try:
+        res = shell32.SHGetFileInfoW(
+            r"C:\\Windows",
+            FILE_ATTRIBUTE_DIRECTORY,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            flags
+        )
+        if res and info.hIcon:
+            tk_icon = _hicon_to_photoimage(info.hIcon, size, destroy_after=True)
+    except Exception:
+        tk_icon = None
+    # 失敗時は従来通りダミー名で再試行
+    if tk_icon is None:
+        try:
+            res = shell32.SHGetFileInfoW(
+                "dummy_folder",
+                FILE_ATTRIBUTE_DIRECTORY,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+                flags
+            )
+            if res and info.hIcon:
+                tk_icon = _hicon_to_photoimage(info.hIcon, size, destroy_after=True)
+        except Exception:
+            tk_icon = None
+    # それでも失敗した場合はダミー
     if tk_icon is None:
         tk_icon = _create_fallback_icon(size)
 
@@ -321,34 +334,60 @@ def get_file_icon(path, size=16):
     """ファイルパスからアイコンを取得する。パスが存在しない場合は警告アイコンを返す。"""
 
     # サイズに応じたフラグを決定する
-    # SHGFI_ICON (0x100) は必須
-    # SHGFI_LARGEICON (0x0) は大きいアイコン(通常32x32)
-    # SHGFI_SMALLICON (0x1) は小さいアイコン(通常16x16)
-    if size > 20: # 閾値。20pxより大きいサイズを要求されたら大きいアイコンを取得
-        flags = 0x100 | 0x0 # SHGFI_ICON | SHGFI_LARGEICON
+    if size > 20:
+        flags = 0x100 | 0x0
     else:
-        flags = 0x100 | 0x1 # SHGFI_ICON | SHGFI_SMALLICON
-
+        flags = 0x100 | 0x1
     key = (path, size, flags)
     # まず、キャッシュを確認
     if key in _icon_cache:
         return _icon_cache[key]
-    
+
     # ファイル/フォルダの存在を確認
-    if not os.path.exists(path):
-        warn_icon = get_system_warning_icon(size)
-        _icon_cache[key] = warn_icon  # (path, size, flags) でキャッシュ
-        return warn_icon
-    
+    file_exists = os.path.exists(path)
+    # ファイル・フォルダが存在しない場合は警告アイコンを返す
+    if not file_exists:
+        tk_icon = get_system_warning_icon(size)
+        _icon_cache[key] = tk_icon
+        return tk_icon
+
     info = SHFILEINFO()
     res = shell32.SHGetFileInfoW(path, 0, ctypes.byref(info), ctypes.sizeof(info), flags)
-    
+
+    tk_icon = None
     if res and info.hIcon:
-        # 取得したアイコンハンドルを適切なサイズに変換
-        # _hicon_to_photoimage は DestroyIcon を内部で呼ぶのでハンドルはここで破棄不要
         tk_icon = _hicon_to_photoimage(info.hIcon, size)
     else:
-        # 取得失敗時はフォルダアイコンで代用
+        # exeの場合はExtractIconExで直接抽出
+        if path.lower().endswith('.exe'):
+            try:
+                large = ctypes.c_void_p()
+                small = ctypes.c_void_p()
+                num_icons = shell32.ExtractIconExW(path, 0, ctypes.byref(large), ctypes.byref(small), 1)
+                hIcon = None
+                if size > 20 and large.value:
+                    hIcon = large.value
+                elif small.value:
+                    hIcon = small.value
+                if hIcon:
+                    tk_icon = _hicon_to_photoimage(hIcon, size, destroy_after=True)
+            except Exception as e:
+                logging.info(f"[get_file_icon] ExtractIconEx failed: {path}: {e}")
+        # 拡張子からアイコン取得（jpg, mp4, txt, pdf等）
+        if tk_icon is None:
+            SHGFI_ICON = 0x100
+            SHGFI_SMALLICON = 0x1
+            SHGFI_USEFILEATTRIBUTES = 0x10
+            ext = os.path.splitext(path)[1]
+            if ext:
+                dummy_name = f"dummy{ext}"
+                attr = 0x80  # FILE_ATTRIBUTE_NORMAL
+                flags2 = SHGFI_ICON | (SHGFI_SMALLICON if size <= 20 else 0) | SHGFI_USEFILEATTRIBUTES
+                info2 = SHFILEINFO()
+                res2 = shell32.SHGetFileInfoW(dummy_name, attr, ctypes.byref(info2), ctypes.sizeof(info2), flags2)
+                if res2 and info2.hIcon:
+                    tk_icon = _hicon_to_photoimage(info2.hIcon, size, destroy_after=True)
+    if tk_icon is None:
         tk_icon = get_system_folder_icon(size)
 
     _icon_cache[key] = tk_icon
@@ -1078,7 +1117,7 @@ class LinkPopup(tk.Toplevel):
         #self.folder_icon = get_system_folder_icon(size=16)
         self.folder_icon = None
         self.arrow_icon = None
-        
+
         self.reload_links()
         self.apply_settings(self.settings)
 
@@ -1099,6 +1138,7 @@ class LinkPopup(tk.Toplevel):
         self.icon_size = round_to_step(self.icon_size, step=4)
         self.icon_size = max(12, min(self.icon_size, 32))
         self.ICON_COLUMN_WIDTH = self.icon_size + 5  # 左4px+アイコン+右1px
+        # フォルダアイコンを必ず取得
         self.folder_icon = get_system_folder_icon(size=self.icon_size)
         self.draw_list()
 
@@ -1224,7 +1264,6 @@ class LinkPopup(tk.Toplevel):
                     fill=arrow_color
                 )
             y += self.group_row_height
-        
 
     def on_motion(self, event):
         row_h = self.group_row_height 
