@@ -23,6 +23,7 @@ links.json
 
 # Pillowキャッシュ
 *.png
+!icon.png
 
 # その他
 app_errors.log
