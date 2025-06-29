@@ -612,7 +612,10 @@ class LinksEditDialog(tk.Toplevel):
         if 'app_icon' in globals() and app_icon:
             self.iconphoto(True, app_icon)
 
-        self.groups = [dict(group) for group in groups]
+        # 元データをディープコピーして保持
+        self.groups = [dict(g, links=[dict(l) for l in g.get('links', [])]) for g in groups]
+        self.original_groups = [dict(g, links=[dict(l) for l in g.get('links', [])]) for g in groups]
+
         self.settings = settings
         self.link_row_height = 24 # デフォルト値
         self.link_icon_size = 16 # デフォルト値
@@ -621,86 +624,166 @@ class LinksEditDialog(tk.Toplevel):
         self.icon_refs = []
         self.result = None
         self.modified = False  # 変更フラグ
+        self.is_searching = False
 
         # ウィンドウクローズ時のハンドラ
         self.protocol("WM_DELETE_WINDOW", self.cancel)
 
         self.resizable(True, True)
-        self.minsize(600, 400)
+        self.minsize(640, 420)
 
         # --- レイアウト設定 ---
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
         main_pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        main_pane.grid(row=0, column=0, sticky="nsew")
+        main_pane.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
-        # --- フォント定義（下線なしを明示） ---
-        title_font = tkfont.Font(family=self.settings['font'], size=self.settings['size'] - 1, underline=False)
-        content_font = tkfont.Font(family=self.settings['font'], size=self.settings['size'], underline=False)
+        # --- フォント定義 ---
+        title_font = tkfont.Font(family=self.settings['font'], size=self.settings['size'] - 1)
+        content_font = tkfont.Font(family=self.settings['font'], size=self.settings['size'])
 
-        # --- 左ペイン：グループ一覧 ---
-        # 幅を明示的に広げる（例: width=180）
-        group_outer = tk.Frame(main_pane, width=115)
-        group_outer.pack_propagate(False)
-        group_pane = tk.LabelFrame(group_outer, text="グループ", font=title_font, bd=1, padx=8, pady=2)  # 内側余白を大きめに
-        group_pane.pack(expand=True, fill="both")
-        group_pane.grid_rowconfigure(0, weight=1)
+        # =================================================================
+        # === 左ペイン：グループ一覧 ===
+        # =================================================================
+        group_outer_frame = tk.Frame(main_pane, width=150)  # PanedWindow用コンテナ
+        group_outer_frame.pack_propagate(False) # ★重要: このフレームが縮まないようにする
+        group_outer_frame.grid_rowconfigure(0, weight=1)
+        group_outer_frame.grid_columnconfigure(0, weight=1)
+
+        group_pane = tk.LabelFrame(group_outer_frame, text="グループ", font=title_font, bd=1, padx=5, pady=5)
+        group_pane.grid(row=0, column=0, sticky="nsew")
+        
+        # LabelFrame内部のGrid設定
         group_pane.grid_columnconfigure(0, weight=1)
-        group_scrollbar = tk.Scrollbar(group_pane, orient="vertical")
-        self.group_listbox = tk.Listbox(group_pane, yscrollcommand=group_scrollbar.set, exportselection=False, font=content_font)
-        self.group_listbox.grid(row=0, column=0, sticky="nsew", pady=(1,0))
-        group_scrollbar.config(command=self.group_listbox.yview)
-        group_scrollbar.grid(row=0, column=1, sticky="ns")
+        group_pane.grid_rowconfigure(1, weight=1) # Listboxの行を伸縮させる
+
+        # --- 検索ボックス ---
+        #search_frame = tk.Frame(group_pane, bd=1, relief=tk.SOLID, borderwidth=1)
+        # 親フレームのデフォルト背景色を取得する
+        try:
+            # まずはEntryのスタイルから色を取得しようと試みる
+            style = ttk.Style(self)
+            bg_color = style.lookup('TEntry', 'fieldbackground')
+            if not bg_color or bg_color in ("", "transparent"):
+                # ttkのテーマによっては""や"transparent"が返る場合があるので、親ウィジェットの背景色を使う
+                bg_color = self.cget('background')
+        except tk.TclError:
+            # 失敗した場合は、フォールバックとしてウィンドウの標準背景色を取得
+            bg_color = self.cget('background')
+
+        border_color = lighten_color(bg_color, 0.2)
+        search_frame = tk.Frame(group_pane, bg=bg_color, highlightbackground=border_color, highlightthickness=1) 
+        search_frame.grid(row=0, column=0, sticky="ew", pady=(2, 6))
+        
+        search_icon_label = tk.Label(search_frame, text="🔍", font=("Segoe UI Symbol", self.settings['size']))
+        search_icon_label.pack(side="left", padx=(5, 0))
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, style='Search.TEntry')
+        self.search_entry.pack(side="left", fill="both", expand=True)
+        
+        style = ttk.Style(self)
+        style.configure('Search.TEntry', borderwidth=0, relief='flat')
+
+        search_frame.config(bg=bg_color)
+        search_icon_label.config(bg=bg_color)
+        self.search_var.trace_add("write", self._on_search_change)
+
+        # --- グループリストボックス ---
+        group_list_frame = tk.Frame(group_pane)
+        group_list_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 4))
+        
+        group_scrollbar = tk.Scrollbar(group_list_frame, orient="vertical")
+        self.group_listbox = tk.Listbox(group_list_frame, yscrollcommand=group_scrollbar.set, exportselection=False, font=content_font)
+
+        # ★★★ placeを使って配置 ★★★
+        group_scrollbar.place(relx=1.0, rely=0, relheight=1.0, anchor='ne')
+        self.group_listbox.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+        # スクロールバーの分だけListboxの幅を狭める
+        self.group_listbox.config(width=0) # これによりrelwidthが優先される
+        self.group_listbox.place_configure(relwidth=1.0, bordermode='outside', width=-group_scrollbar.winfo_reqwidth())
+        
         self.group_listbox.bind('<<ListboxSelect>>', self.on_group_select)
-        group_btns_frame = tk.Frame(group_pane)
-        group_btns_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
-        tk.Button(group_btns_frame, text="追加", command=self.add_group).pack(side="left")
-        tk.Button(group_btns_frame, text="名変更", command=self.rename_group).pack(side="left")
-        tk.Button(group_btns_frame, text="削除", command=self.delete_group).pack(side="left")
-        tk.Button(group_btns_frame, text="↑", command=self.move_group_up).pack(side="left")
-        tk.Button(group_btns_frame, text="↓", command=self.move_group_down).pack(side="left")
-        main_pane.add(group_outer, weight=1)
-        # --- 右ペイン：リンク一覧 ---
-        link_outer = tk.Frame(main_pane)
-        link_outer.pack_propagate(False)
-        link_pane = tk.LabelFrame(link_outer, text="リンク", font=title_font, bd=1, padx=8, pady=2)  # 内側余白を大きめに
-        link_pane.pack(expand=True, fill="both")
-        link_pane.grid_rowconfigure(1, weight=1)
+
+        self.no_results_label = tk.Label(group_list_frame, text="検索結果がありません", font=content_font, fg="gray")
+        # ★★★ placeを使って重ねて配置 ★★★
+        self.no_results_label.place(relx=0.5, rely=0.5, anchor='center')
+        self.no_results_label.lower() # 最初は非表示（背面に）
+        
+        # --- グループ操作ボタン ---
+        self.group_btns_frame = tk.Frame(group_pane)
+        self.group_btns_frame.grid(row=2, column=0, sticky="ew")
+        # (ボタンの作成とpackは変更なし)
+        self.add_group_btn = tk.Button(self.group_btns_frame, text="追加", command=self.add_group)
+        self.add_group_btn.pack(side="left")
+        self.rename_group_btn = tk.Button(self.group_btns_frame, text="名変更", command=self.rename_group)
+        self.rename_group_btn.pack(side="left")
+        self.delete_group_btn = tk.Button(self.group_btns_frame, text="削除", command=self.delete_group)
+        self.delete_group_btn.pack(side="left")
+        self.move_group_up_btn = tk.Button(self.group_btns_frame, text="↑", command=self.move_group_up)
+        self.move_group_up_btn.pack(side="left")
+        self.move_group_down_btn = tk.Button(self.group_btns_frame, text="↓", command=self.move_group_down)
+        self.move_group_down_btn.pack(side="left")
+
+        main_pane.add(group_outer_frame)
+
+        # =================================================================
+        # === 右ペイン：リンク一覧 ===
+        # =================================================================
+        link_outer_frame = tk.Frame(main_pane)
+        link_outer_frame.grid_rowconfigure(0, weight=1)
+        link_outer_frame.grid_columnconfigure(0, weight=1)
+
+        link_pane = tk.LabelFrame(link_outer_frame, text="リンク", font=title_font, bd=1, padx=5, pady=5)
+        link_pane.grid(row=0, column=0, sticky="nsew")
+        
         link_pane.grid_columnconfigure(0, weight=1)
-        # --- EntryとCanvasの左端を完全に揃えるため、padx=0で統一 ---
+        link_pane.grid_rowconfigure(1, weight=1) # Canvasの行を伸縮させる
+
+        # --- アドレス入力ボックス ---
         link_addr_row = tk.Frame(link_pane)
-        link_addr_row.grid(row=0, column=0, columnspan=2, sticky="ew", padx=0, pady=0)  # padx=0
+        link_addr_row.grid(row=0, column=0, sticky="ew", pady=(2, 6))
         link_addr_row.grid_columnconfigure(0, weight=1)
-        link_addr_row.grid_rowconfigure(0, weight=1) 
+        
         self.link_addr_var = tk.StringVar()
-        self.link_addr_entry = ttk.Entry(link_addr_row, textvariable=self.link_addr_var, font=content_font )
-        self.link_addr_entry.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
-        self.save_addr_btn = tk.Button(link_addr_row, text="保存", command=self.save_link_addr)
+        self.link_addr_entry = ttk.Entry(link_addr_row, textvariable=self.link_addr_var, font=content_font)
+        self.link_addr_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        self.save_addr_btn = tk.Button(link_addr_row, text="保存", command=self.save_link_addr, height=1)
         self.save_addr_btn.grid(row=0, column=1, sticky="e")
         self.link_addr_entry.bind("<FocusIn>", self.on_link_addr_focus)
-        link_scrollbar = tk.Scrollbar(link_pane, orient="vertical")
-        self.link_canvas = tk.Canvas(link_pane, bg="#ffffff", highlightthickness=0)
-        self.link_canvas.grid(row=1, column=0, sticky="nsew", padx=0)  # padx=0
+        
+        # --- リンク一覧キャンバス ---
+        #link_canvas_frame = tk.Frame(link_pane, bg="#ffffff", bd=1, relief=tk.SOLID)
+        link_canvas_frame = tk.Frame(link_pane, bg="#ffffff")
+        link_canvas_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 4))
+        link_canvas_frame.grid_rowconfigure(0, weight=1)
+        link_canvas_frame.grid_columnconfigure(0, weight=1)
+
+        link_scrollbar = tk.Scrollbar(link_canvas_frame, orient="vertical")
+        self.link_canvas = tk.Canvas(link_canvas_frame, bg="#ffffff", highlightthickness=0, yscrollcommand=link_scrollbar.set)
+        self.link_canvas.grid(row=0, column=0, sticky="nsew")
         link_scrollbar.config(command=self.link_canvas.yview)
-        link_scrollbar.grid(row=1, column=1, sticky="ns")
-        self.link_canvas.configure(yscrollcommand=link_scrollbar.set)
+        link_scrollbar.grid(row=0, column=1, sticky="ns")
         self.link_canvas.bind("<Configure>", lambda e: self.refresh_link_list())
         self.link_canvas.bind("<MouseWheel>", self._on_link_canvas_mousewheel)
         self.link_canvas.bind("<Button-1>", self.on_link_canvas_click)
         self.link_canvas.bind("<Double-Button-1>", self.on_link_canvas_double)
-        #self.link_canvas.bind("<Motion>", self.on_canvas_motion) # マウス移動
-        #self.link_canvas.bind("<Leave>", self.on_canvas_leave)   # マウスがCanvasから出た時
-        #self.tooltip = ToolTip(self.link_canvas)
-        #self.canvas_item_map = {} # {canvas_item_id: path_string}
-        link_btns = tk.Frame(link_pane)
-        link_btns.grid(row=2, column=0, columnspan=2, sticky="ew")
-        tk.Button(link_btns, text="追加", command=self.add_link).pack(side="left")
-        tk.Button(link_btns, text="名変更", command=self.rename_link).pack(side="left")
-        tk.Button(link_btns, text="削除", command=self.delete_link).pack(side="left")
-        tk.Button(link_btns, text="↑", command=self.move_link_up).pack(side="left")
-        tk.Button(link_btns, text="↓", command=self.move_link_down).pack(side="left")
-        main_pane.add(link_outer, weight=4)
+
+        # --- リンク操作ボタン ---
+        self.link_btns_frame = tk.Frame(link_pane)
+        self.link_btns_frame.grid(row=2, column=0, sticky="ew")
+        self.add_link_btn = tk.Button(self.link_btns_frame, text="追加", command=self.add_link)
+        self.add_link_btn.pack(side="left")
+        self.rename_link_btn = tk.Button(self.link_btns_frame, text="名変更", command=self.rename_link)
+        self.rename_link_btn.pack(side="left")
+        self.delete_link_btn = tk.Button(self.link_btns_frame, text="削除", command=self.delete_link)
+        self.delete_link_btn.pack(side="left")
+        self.move_link_up_btn = tk.Button(self.link_btns_frame, text="↑", command=self.move_link_up)
+        self.move_link_up_btn.pack(side="left")
+        self.move_link_down_btn = tk.Button(self.link_btns_frame, text="↓", command=self.move_link_down)
+        self.move_link_down_btn.pack(side="left")
+
+        main_pane.add(link_outer_frame)
 
         # --- OK/Cancelボタン ---
         button_frame = tk.Frame(self)
@@ -716,6 +799,16 @@ class LinksEditDialog(tk.Toplevel):
         # --- 初期化と表示処理 ---
         self.refresh_group_list()
         self.group_listbox.focus_set()
+        self._update_buttons_state() # ボタンの初期状態を設定
+
+        # # ★★★ PanedWindowの初期分割位置を設定 ★★★
+        # self.update_idletasks() # ウィジェットのサイズを計算させる
+        # try:
+        #     # 全体の幅の約1/4を左ペインに割り当てる
+        #     sash_position = self.winfo_width() // 4
+        #     main_pane.sashpos(0, sash_position)
+        # except tk.TclError:
+        #     logging.warning("Failed to set initial sash position.")
 
         # ★最重要ポイント2: 親(root)に頼らず、スクリーンの中央に配置
         self.update_idletasks() # これでウィンドウの要求サイズが計算される
@@ -752,7 +845,8 @@ class LinksEditDialog(tk.Toplevel):
 
     # ok, cancel
     def ok(self, event=None):
-        self.result = self.groups.copy()
+        # 変更：常にマスターデータである original_groups を結果として返す
+        self.result = self.original_groups
         self.destroy()
 
     def cancel(self, event=None):
@@ -763,52 +857,97 @@ class LinksEditDialog(tk.Toplevel):
         self.destroy()
 
     def add_group(self):
+        # このメソッドは検索中は呼ばれないが、念のためロジックを堅牢に
         name = simpledialog.askstring("グループ名", "新しいグループ名:", parent=self)
         if name:
-            self.groups.append({'group': name, 'links': []})
+            new_group = {'group': name, 'links': []}
+            # 元データに追加
+            self.original_groups.append(new_group)
+            # 表示データにも追加
+            self.groups.append(new_group.copy())
+
             self.selected_group = len(self.groups) - 1
             self.refresh_group_list()
             self.refresh_link_list()
             self.modified = True
 
     def rename_group(self):
-        if not self.groups:
+        if not self.groups or self.selected_group is None:
             return
         idx = self.selected_group
-        new_name = simpledialog.askstring("グループ名変更", "新しいグループ名:", initialvalue=self.groups[idx]['group'], parent=self)
-        if new_name:
+        
+        # 変更前のグループ名を取得（これが元データを探すキーになる）
+        original_name = self.groups[idx]['group']
+        
+        new_name = simpledialog.askstring("グループ名変更", "新しいグループ名:", initialvalue=original_name, parent=self)
+        
+        if new_name and new_name != original_name:
+            # 表示用データを更新
             self.groups[idx]['group'] = new_name
+            
+            # 元データ(original_groups)も探し出して更新
+            for g in self.original_groups:
+                if g['group'] == original_name:
+                    g['group'] = new_name
+                    break # 見つけたら抜ける
+
             self.refresh_group_list()
             self.modified = True
 
     def delete_group(self):
-        if not self.groups:
+        if not self.groups or self.selected_group is None:
             return
-        idx = self.selected_group
-        del self.groups[idx]
+        
+        group_to_delete_name = self.groups[self.selected_group]['group']
+
+        if not messagebox.askyesno("確認", f"グループ '{group_to_delete_name}' を削除しますか？\n（中のリンクもすべて削除されます）", parent=self):
+            return
+
+        # 表示データから削除
+        del self.groups[self.selected_group]
+        
+        # 元データ(original_groups)も探し出して削除
+        self.original_groups = [g for g in self.original_groups if g['group'] != group_to_delete_name]
+
         self.selected_group = max(0, self.selected_group - 1)
+        if not self.groups:
+            self.selected_group = None
+
         self.refresh_group_list()
         self.refresh_link_list()
         self.modified = True
 
     def move_group_up(self):
+        # 検索中は無効になっているはずだが、念のためチェック
+        if self.is_searching: return
+        
         idx = self.selected_group
         if idx > 0:
-            self.groups[idx-1], self.groups[idx] = self.groups[idx], self.groups[idx-1]
+            # ★★★ original_groups を直接並べ替える ★★★
+            self.original_groups[idx-1], self.original_groups[idx] = self.original_groups[idx], self.original_groups[idx-1]
+            # 表示用データも同じように並べ替える
+            self.groups = [dict(g, links=[dict(l) for l in g.get('links', [])]) for g in self.original_groups]
+            
             self.selected_group -= 1
             self.refresh_group_list()
             self.modified = True
 
     def move_group_down(self):
+        if self.is_searching: return
+        
         idx = self.selected_group
-        if idx < len(self.groups)-1:
-            self.groups[idx+1], self.groups[idx] = self.groups[idx], self.groups[idx+1]
+        if idx < len(self.original_groups) - 1:
+            # ★★★ original_groups を直接並べ替える ★★★
+            self.original_groups[idx+1], self.original_groups[idx] = self.original_groups[idx], self.original_groups[idx+1]
+            # 表示用データも同じように並べ替える
+            self.groups = [dict(g, links=[dict(l) for l in g.get('links', [])]) for g in self.original_groups]
+
             self.selected_group += 1
             self.refresh_group_list()
             self.modified = True
 
     def add_link(self):
-        if not self.groups:
+        if not self.groups or self.selected_group is None:
             return
         # クリップボードからデフォルト値取得
         clipboard_text = None
@@ -834,8 +973,22 @@ class LinksEditDialog(tk.Toplevel):
         path = self.ask_dialog(self, "リンク先", "リンク先パスまたはURL:", initialvalue=default_path)
         if not path:  # Noneまたは空文字列
             return
-        self.groups[self.selected_group]['links'].append({'name': name, 'path': path})
-        self.selected_link = len(self.groups[self.selected_group]['links'])-1
+        
+        new_link = {'name': name, 'path': path}
+
+        # --- ★★★ データ同期ロジック ★★★ ---
+        # 1. 表示されているグループ名を取得
+        current_group_name = self.groups[self.selected_group]['group']
+        
+        # 2. original_groups から該当グループを探し、そこに新しいリンクを追加
+        for g in self.original_groups:
+            if g['group'] == current_group_name:
+                g['links'].append(new_link)
+                break
+        # 3. 表示用のgroupsにも追加
+        self.groups[self.selected_group]['links'].append(new_link)
+        self.selected_link = len(self.groups[self.selected_group]['links']) - 1
+
         # --- 追加したリンクのアイコンを個別にキャッシュ取得 ---
         try:
             if path.startswith('http'):
@@ -845,46 +998,110 @@ class LinksEditDialog(tk.Toplevel):
         except Exception as e:
             logging.info(f"[add_link] icon fetch failed: {path} : {e}")
         self.refresh_link_list()
+        self._update_buttons_state()
         self.modified = True
 
     def rename_link(self):
-        if not self.groups or self.selected_link is None:
+        if not self.groups or self.selected_group is None or self.selected_link is None:
             return
-        links = self.groups[self.selected_group]['links']
-        idx = self.selected_link
-        new_name = simpledialog.askstring("名前変更", "新しい名前:", initialvalue=links[idx]['name'], parent=self)
-        if new_name:
-            links[idx]['name'] = new_name
+        
+        # --- ★★★ データ同期ロジック ★★★ ---
+        # 1. 変更対象の情報を取得
+        group_name = self.groups[self.selected_group]['group']
+        link_idx = self.selected_link
+
+        # ★重要: original_groups内の本当のオブジェクトを見つけるために、表示上のインデックスだけでなく、
+        #        表示データと内容が一致するオブジェクトを探す必要があります。
+        #        まず、表示されているリンクの情報を取得します。
+        visible_link = self.groups[self.selected_group]['links'][link_idx]
+        
+        new_name = simpledialog.askstring("名前変更", "新しい名前:", initialvalue=visible_link['name'], parent=self)
+        
+        if new_name and new_name != visible_link['name']:
+            # 2. original_groups から該当グループとリンクを探して更新
+            for g in self.original_groups:
+                if g['group'] == group_name:
+                    # g['links']の中から、表示されているリンクと内容が一致するものを探す
+                    for original_link in g['links']:
+                        if original_link['name'] == visible_link['name'] and original_link['path'] == visible_link['path']:
+                            original_link['name'] = new_name
+                            break
+                    break
+            
+            # 3. 表示用データも更新
+            visible_link['name'] = new_name
+
+            # 4. 画面を更新
             self.refresh_link_list()
             self.modified = True
 
     def delete_link(self):
-        if not self.groups or self.selected_link is None:
+        if not self.groups or self.selected_group is None or self.selected_link is None:
             return
-        links = self.groups[self.selected_group]['links']
-        del links[self.selected_link]
+
+        # --- ★★★ データ同期ロジック ★★★ ---
+        # 1. 削除対象の情報を取得
+        group_name = self.groups[self.selected_group]['group']
+        link_to_delete = self.groups[self.selected_group]['links'][self.selected_link]
+        
+        # 2. original_groups から該当グループとリンクを探して削除
+        for g in self.original_groups:
+            if g['group'] == group_name:
+                g['links'] = [link for link in g['links'] if not (link['name'] == link_to_delete['name'] and link['path'] == link_to_delete['path'])]
+                break
+
+        # 3. 表示用データから削除
+        del self.groups[self.selected_group]['links'][self.selected_link]
         self.selected_link = None
+        
+        # 4. 画面を更新
         self.refresh_link_list()
+        self._update_buttons_state()
         self.modified = True
 
     def move_link_up(self):
-        if not self.groups or self.selected_link is None or self.selected_link == 0:
+        if self.is_searching: return
+        if not self.groups or self.selected_group is None or self.selected_link is None or self.selected_link == 0:
             return
+
+        # ★★★ original_groups 内の該当リンクを直接並べ替える ★★★
+        group_name = self.groups[self.selected_group]['group']
+        link_idx = self.selected_link
+        
+        for g in self.original_groups:
+            if g['group'] == group_name:
+                g['links'][link_idx-1], g['links'][link_idx] = g['links'][link_idx], g['links'][link_idx-1]
+                break
+        
+        # 表示用データも更新
         links = self.groups[self.selected_group]['links']
-        i = self.selected_link
-        links[i-1], links[i] = links[i], links[i-1]
+        links[link_idx-1], links[link_idx] = links[link_idx], links[link_idx-1]
+        
         self.selected_link -= 1
         self.refresh_link_list()
         self.modified = True
 
     def move_link_down(self):
-        if not self.groups or self.selected_link is None:
+        if self.is_searching: return
+        if not self.groups or self.selected_group is None or self.selected_link is None:
             return
+
         links = self.groups[self.selected_group]['links']
-        i = self.selected_link
-        if i == len(links)-1:
+        link_idx = self.selected_link
+        if link_idx >= len(links) - 1:
             return
-        links[i+1], links[i] = links[i], links[i+1]
+
+        # ★★★ original_groups 内の該当リンクを直接並べ替える ★★★
+        group_name = self.groups[self.selected_group]['group']
+        
+        for g in self.original_groups:
+            if g['group'] == group_name:
+                g['links'][link_idx+1], g['links'][link_idx] = g['links'][link_idx], g['links'][link_idx+1]
+                break
+
+        # 表示用データも更新
+        links[link_idx+1], links[link_idx] = links[link_idx], links[link_idx]
+        
         self.selected_link += 1
         self.refresh_link_list()
         self.modified = True
@@ -976,14 +1193,30 @@ class LinksEditDialog(tk.Toplevel):
             self.link_canvas.config(state="normal")
 
     def on_link_canvas_click(self, event):
-        idx = (event.y - 2) // self.link_row_height
+        # 現在表示されているグループのリンク一覧を取得
+        if not self.groups or self.selected_group is None:
+            return
         links = self.groups[self.selected_group]['links']
+
+        # クリックされたY座標から、何番目のリンクかを計算
+        idx = (event.y - 2) // self.link_row_height
+        
         if 0 <= idx < len(links):
-            self.selected_link = idx
-            self.link_addr_var.set(links[idx]['path'])
+            # 有効なリンクがクリックされた場合
+            if self.selected_link == idx:
+                # すでに選択されている項目を再度クリックした場合は選択を解除
+                self.selected_link = None
+            else:
+                self.selected_link = idx
+            self.link_addr_var.set(links[self.selected_link]['path'] if self.selected_link is not None else "")
         else:
+            # リンク以外の場所（空白領域）がクリックされた場合は選択を解除
             self.selected_link = None
+            self.link_addr_var.set("")
+            
+        # 選択状態が変わったので、Canvasを再描画してハイライトを更新
         self.refresh_link_list()
+        self._update_buttons_state()
 
     def on_link_canvas_double(self, event):
         idx = (event.y - 2) // self.link_row_height
@@ -993,12 +1226,32 @@ class LinksEditDialog(tk.Toplevel):
             open_link(path)
 
     def save_link_addr(self):
-        if not self.groups or self.selected_link is None:
+        if not self.groups or self.selected_group is None or self.selected_link is None:
             return
-        links = self.groups[self.selected_group]['links']
-        old_path = links[self.selected_link]['path']
-        new_path = self.link_addr_var.get()
-        links[self.selected_link]['path'] = new_path
+
+        # --- ★★★ データ同期ロジック ★★★ ---
+        # 1. 変更対象の情報を取得
+        group_name = self.groups[self.selected_group]['group']
+        visible_link = self.groups[self.selected_group]['links'][self.selected_link]
+        old_path = visible_link['path']
+        new_path = self.link_addr_var.get().strip()
+
+        if not new_path or new_path == old_path:
+            return
+            
+        # 2. original_groups から該当グループとリンクを探して更新
+        for g in self.original_groups:
+            if g['group'] == group_name:
+                # 名前と古いパスでユニークに特定
+                for original_link in g['links']:
+                    if original_link['name'] == visible_link['name'] and original_link['path'] == old_path:
+                        original_link['path'] = new_path
+                        break
+                break
+
+        # 3. 表示用データも更新
+        visible_link['path'] = new_path
+
         # キャッシュクリア（旧パス・新パス両方）
         for p in (old_path, new_path):
             key = (p, self.link_icon_size)
@@ -1012,6 +1265,8 @@ class LinksEditDialog(tk.Toplevel):
                 get_file_icon(new_path, size=self.link_icon_size)
         except Exception as e:
             logging.info(f"[save_link_addr] icon fetch failed: {new_path} ({self.link_icon_size}px): {e}")
+
+        # 4. 画面を更新
         self.refresh_link_list()
         self.modified = True
 
@@ -1031,6 +1286,92 @@ class LinksEditDialog(tk.Toplevel):
             delta = -1 * (event.delta // 120)
             
         self.link_canvas.yview_scroll(delta, "units")
+
+    def _on_search_change(self, *args):
+        query = self.search_var.get().strip()
+        if query:
+            self.is_searching = True
+            self._perform_search(query)
+        else:
+            self.is_searching = False
+            # 元のリストに戻す
+            self.groups = [dict(g, links=[dict(l) for l in g.get('links', [])]) for g in self.original_groups]
+            self.selected_group = 0 if self.groups else None
+            
+            self.no_results_label.lower() # ラベルを背面に
+            
+        self.refresh_group_list()
+        self._update_buttons_state()
+
+    def _perform_search(self, query):
+        """実際に検索処理を実行し、表示用データを生成する"""
+        query_lower = query.lower()
+        search_results = []
+        
+        for group_data in self.original_groups:
+            matched_links = []
+            group_name_match = query_lower in group_data['group'].lower()
+            
+            for link_data in group_data.get('links', []):
+                if group_name_match:
+                    matched_links.append(link_data.copy())
+                    continue
+                
+                if query_lower in link_data['name'].lower() or query_lower in link_data['path'].lower():
+                    matched_links.append(link_data.copy())
+            
+            if matched_links:
+                search_results.append({'group': group_data['group'], 'links': matched_links})
+
+        self.groups = search_results
+        self.selected_group = 0 if self.groups else None
+
+        if not self.groups:
+            self.no_results_label.lift() # ラベルを前面に
+        else:
+            self.no_results_label.lower() # ラベルを背面に
+
+    def _update_buttons_state(self):
+        """現在の状態に応じて、すべてのボタンの有効/無効を切り替える"""
+        
+        # --- 基本的な状態判定 ---
+        # 検索中か？
+        is_searching = self.is_searching
+        # グループリストに表示項目があるか？
+        has_groups = bool(self.groups)
+        # 何かグループが選択されているか？
+        group_selected = self.selected_group is not None and has_groups
+        # 何かリンクが選択されているか？
+        link_selected = self.selected_link is not None and group_selected
+        
+        # --- 状態変数 ---
+        # 検索中は無効、それ以外は有効
+        search_dependent_state = "disabled" if is_searching else "normal"
+        # グループが選択されていれば有効
+        group_dependent_state = "normal" if group_selected else "disabled"
+        # リンクが選択されていれば有効
+        link_dependent_state = "normal" if link_selected else "disabled"
+
+        # --- グループ操作ボタンの状態を更新 ---
+        self.add_group_btn.config(state=search_dependent_state)
+        self.move_group_up_btn.config(state=search_dependent_state)
+        self.move_group_down_btn.config(state=search_dependent_state)
+        
+        # 名変更と削除は、グループが選択されていれば検索中でも有効
+        self.rename_group_btn.config(state=group_dependent_state)
+        self.delete_group_btn.config(state=group_dependent_state)
+
+        # --- リンク操作ボタンの状態を更新 ---
+        # リンクの移動は検索中は無効
+        self.move_link_up_btn.config(state=search_dependent_state)
+        self.move_link_down_btn.config(state=search_dependent_state)
+
+        # リンクの追加は、グループが選択されていれば検索中でも有効
+        self.add_link_btn.config(state=group_dependent_state)
+        
+        # リンクの名変更と削除は、リンクが選択されていれば検索中でも有効
+        self.rename_link_btn.config(state=link_dependent_state)
+        self.delete_link_btn.config(state=link_dependent_state)
 
     # 入力ダイアログをカスタムしてEntry幅を指定
     @staticmethod
