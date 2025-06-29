@@ -19,6 +19,7 @@ from win32com.client import Dispatch
 import logging
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+import shutil
 
 # --- アプリケーション設定 ---
 logging.basicConfig(filename='app_errors.log', level=logging.ERROR,
@@ -33,6 +34,8 @@ else:
 
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 LINKS_FILE = os.path.join(BASE_DIR, "links.json")
+PROFILES_DIR = os.path.join(BASE_DIR, "profiles")
+DEFAULT_PROFILE_NAME = "(default)"
 
 DEFAULT_SETTINGS = {
     'font': 'Yu Gothic UI',
@@ -40,8 +43,22 @@ DEFAULT_SETTINGS = {
     'font_color': '#000000',
     'bg': '#f0f0f0',
     'border_color': '#666666', # デフォルトのボーダー色
-    'use_online_favicon': True,
+    'use_online_favicon': False,
+    "current_profile": "(default)"
 }
+
+# --- ユーティリティ関数 ---
+def get_profile_path(profile_name):
+    """指定されたプロファイルのディレクトリパスを返す。なければ作成する。"""
+    path = os.path.join(PROFILES_DIR, profile_name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def get_all_profile_names():
+    """profilesディレクトリ内のすべてのプロファイル名（ディレクトリ名）を取得する"""
+    if not os.path.isdir(PROFILES_DIR):
+        return []
+    return sorted([d for d in os.listdir(PROFILES_DIR) if os.path.isdir(os.path.join(PROFILES_DIR, d))])
 
 # --- ctypesのグローバル定義 ---
 shell32 = ctypes.windll.shell32
@@ -154,10 +171,12 @@ def save_settings(settings):
     with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
         json.dump(settings, f, ensure_ascii=False, indent=2)
 
-def load_links_data():
-    if os.path.exists(LINKS_FILE):
+def load_links_data(profile_name=DEFAULT_PROFILE_NAME):
+    profile_dir = get_profile_path(profile_name)
+    links_file = os.path.join(profile_dir, "links.json")
+    if os.path.exists(links_file):
         try:
-            with open(LINKS_FILE, 'r', encoding='utf-8') as f:
+            with open(links_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, list) and data and isinstance(data[0], dict) and 'group' in data[0]:
                     return data
@@ -170,14 +189,14 @@ def load_links_data():
             save_links_data(default_links)
             return default_links
     else:
-        # ファイルが存在しない場合は、デフォルトの空データで新規作成する
-        logging.info("Links file not found, creating a new one.")
         default_links = [{"group": "マイリンク", "links": []}]
         save_links_data(default_links)
         return default_links
 
-def save_links_data(links):
-    with open(LINKS_FILE, 'w', encoding='utf-8') as f:
+def save_links_data(links, profile_name=DEFAULT_PROFILE_NAME):
+    profile_dir = get_profile_path(profile_name)
+    links_file = os.path.join(profile_dir, "links.json")
+    with open(links_file, 'w', encoding='utf-8') as f:
         json.dump(links, f, ensure_ascii=False, indent=2)
 
 def open_link(path):
@@ -983,7 +1002,7 @@ class LinksEditDialog(tk.Toplevel):
         # 2. original_groups から該当グループを探し、そこに新しいリンクを追加
         for g in self.original_groups:
             if g['group'] == current_group_name:
-                g['links'].append(new_link)
+                g['links'].append(new_link.copy())
                 break
         # 3. 表示用のgroupsにも追加
         self.groups[self.selected_group]['links'].append(new_link)
@@ -1435,10 +1454,11 @@ class LinkPopup(tk.Toplevel):
     # ICON_COLUMN_WIDTH = 24  # ←固定値を廃止
     TEXT_LEFT_PADDING = 0   # アイコンとテキストの間の隙間
     
-    def __init__(self, master, settings):
+    def __init__(self, master, settings, profile_name):
         super().__init__(master)
         if app_icon:
             self.iconphoto(True, app_icon)
+        self.profile_name = profile_name
         self.settings = settings.copy()
         self.group_row_height = 24 # デフォルト値
         self.icon_size = 16 # デフォルト値
@@ -1483,10 +1503,17 @@ class LinkPopup(tk.Toplevel):
         self.folder_icon = get_system_folder_icon(size=self.icon_size)
         self.draw_list()
 
+    def reload_profile(self, profile_name):
+        self.profile_name = profile_name
+        # settingsは共有なので再読み込みは不要。ただし、必要ならここで読み込んでも良い。
+        # self.settings = load_settings() 
+        self.reload_links() # 新しいプロファイルのlinks.jsonを読み込む
+        self.apply_settings(self.settings) # 見た目を更新
+
     def reload_links(self):
         self.link_items.clear()
         self.group_map.clear()
-        groups_data = load_links_data()
+        groups_data = load_links_data(self.profile_name)
         if groups_data is None:
             links_os = self._load_os_links()
             groups_data = [{"group": "マイリンク", "links": [{"name": n, "path": p} for n, p in links_os.items()]}]
@@ -1720,6 +1747,120 @@ class LinkPopup(tk.Toplevel):
                     win.winfo_rooty() <= y < win.winfo_rooty() + win.winfo_height())
         except tk.TclError: return False
 
+class ProfileManagerDialog(simpledialog.Dialog):
+    def __init__(self, parent, current_profile):
+        self.current_profile = current_profile
+        self.profiles = get_all_profile_names()
+        self.result = None
+        super().__init__(parent, "プロファイルの管理")
+
+    def body(self, master):
+        if 'app_icon' in globals() and app_icon:
+            self.iconphoto(True, app_icon)
+        
+        self.resizable(False, False)
+        
+        list_frame = tk.Frame(master, bd=1, relief=tk.SOLID)
+        list_frame.pack(padx=10, pady=10, expand=True, fill="both")
+        
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side="right", fill="y")
+        
+        self.listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, exportselection=False, height=10)
+        self.listbox.pack(side="left", expand=True, fill="both")
+        scrollbar.config(command=self.listbox.yview)
+
+        for p_name in self.profiles:
+            display_name = p_name
+            if p_name == self.current_profile:
+                display_name += " (現在)"
+            self.listbox.insert(tk.END, display_name)
+            if p_name == self.current_profile:
+                self.listbox.itemconfig(tk.END, {'bg': '#e0e0e0'})
+        
+        # 初期選択
+        try:
+            current_idx = self.profiles.index(self.current_profile)
+            self.listbox.select_set(current_idx)
+        except ValueError:
+            pass
+
+        btn_frame = tk.Frame(master)
+        btn_frame.pack(padx=10, pady=(0, 10), fill="x")
+        
+        tk.Button(btn_frame, text="選択して切り替え", command=self.switch_profile).pack(side="left", padx=2)
+        tk.Button(btn_frame, text="追加", command=self.add_profile).pack(side="left", padx=2)
+        tk.Button(btn_frame, text="名前変更", command=self.rename_profile).pack(side="left", padx=2)
+        tk.Button(btn_frame, text="削除", command=self.delete_profile).pack(side="left", padx=2)
+        
+        return self.listbox
+
+    def get_selected_profile(self):
+        selected_indices = self.listbox.curselection()
+        if not selected_indices:
+            return None
+        return self.profiles[selected_indices[0]]
+
+    def switch_profile(self):
+        selected = self.get_selected_profile()
+        if selected:
+            self.result = {"action": "switch", "profile": selected}
+            self.ok()
+
+    def add_profile(self):
+        new_name = simpledialog.askstring("新規プロファイル", "新しいプロファイル名:", parent=self)
+        if new_name and new_name not in self.profiles:
+            self.result = {"action": "add", "profile": new_name}
+            self.ok()
+        elif new_name:
+            messagebox.showerror("エラー", "その名前は既に使用されています。", parent=self)
+
+    def rename_profile(self):
+        # 1. プロファイルが選択されているかチェック
+        selected = self.get_selected_profile()
+        if not selected:
+            messagebox.showwarning("警告", "名前を変更するプロファイルを選択してください。", parent=self)
+            return
+            
+        # 2. デフォルトプロファイルは変更不可
+        if selected == DEFAULT_PROFILE_NAME:
+            messagebox.showerror("エラー", "デフォルトプロファイルの名前は変更できません。", parent=self)
+            return
+            
+        # 3. 新しい名前をユーザーから入力してもらう
+        new_name = simpledialog.askstring("名前の変更", f"'{selected}' の新しい名前:", initialvalue=selected, parent=self)
+        
+        # 4. 入力の検証
+        if not new_name or new_name == selected:
+            # キャンセルされたか、名前が変わっていない場合は何もしない
+            return
+            
+        if new_name in self.profiles:
+            # 新しい名前が既に存在する場合
+            messagebox.showerror("エラー", f"プロファイル名 '{new_name}' は既に使用されています。", parent=self)
+            return
+
+        # 5. 結果を辞書に格納してダイアログを閉じる
+        self.result = {"action": "rename", "old": selected, "new": new_name}
+        self.ok()
+
+    def delete_profile(self):
+        selected = self.get_selected_profile()
+        if not selected:
+            messagebox.showwarning("警告", "プロファイルを選択してください。", parent=self)
+            return
+        if selected == DEFAULT_PROFILE_NAME:
+            messagebox.showerror("エラー", "デフォルトプロファイルは削除できません。", parent=self)
+            return
+            
+        if messagebox.askyesno("確認", f"プロファイル '{selected}' を削除しますか？\nこの操作は元に戻せません。", parent=self):
+            self.result = {"action": "delete", "profile": selected}
+            self.ok()
+            
+    def buttonbox(self):
+        # OK/Cancelボタンは不要なので、何もしないようにオーバーライド
+        pass
+
 def ellipsize_text(text, font_obj, max_width):
     if font_obj.measure(text) <= max_width:
         return text
@@ -1746,7 +1887,17 @@ def main():
             logging.warning("Failed to set DPI awareness.")
 
     global root, popup, settings, app_icon
+
+    # --- ★★★ アプリケーション起動時の処理 ★★★ ---
+    # 1. 設定ファイルを読み込む
     settings = load_settings()
+
+    # 2. デフォルトプロファイルが存在するか確認し、なければ作成
+    if not os.path.exists(get_profile_path(DEFAULT_PROFILE_NAME)):
+        # デフォルトの空のlinks.jsonを作成
+        save_links_data([{"group": "マイリンク", "links": []}], DEFAULT_PROFILE_NAME)
+        
+    current_profile_name = settings.get('current_profile', DEFAULT_PROFILE_NAME)
 
     def run_tray():
         try:
@@ -1756,13 +1907,20 @@ def main():
             
             def show_popup_action(icon=None): root.after(0, popup.show)
             def edit_links_action(icon=None): root.after(0, open_links_editor)
+            def profile_action(icon=None):
+             root.after(0, open_profile_manager)
             def settings_action(icon=None): root.after(0, open_settings_dialog)
             def exit_action(icon=None):
                 icon.stop()
                 root.after(0, root.quit)
 
-            menu = Menu(item('リンクを表示', show_popup_action, default=True), item('リンク編集', edit_links_action),
-                        item('設定', settings_action), Menu.SEPARATOR, item('終了', exit_action))
+            menu = Menu(item('リンクを表示', show_popup_action, default=True), 
+                        item('リンク編集', open_links_editor),
+                        item('プロファイル管理', profile_action),
+                        item('設定', settings_action), 
+                        Menu.SEPARATOR, 
+                        item('終了', exit_action))
+        
             icon = Icon("QuickLauncher", image, "QuickLauncher", menu)
             icon.run()
         except Exception as e:
@@ -1770,18 +1928,12 @@ def main():
         if root: root.quit()
 
     def open_links_editor():
-        links_data = load_links_data()
-        if links_data is None: 
-            links_data = [{"group": "マイリンク", "links": []}]
-        
-        # ダイアログをインスタンス化するだけで、__init__内のwait_windowで待機が始まる
+        links_data = load_links_data(current_profile_name)
         dialog = LinksEditDialog(root, links_data, settings)
-        
-        # ダイアログが閉じた後、結果を見て処理を続ける
         if dialog.result is not None:
-            save_links_data(dialog.result)
-            if popup: 
-                popup.reload_links()
+            save_links_data(dialog.result, current_profile_name)
+            if popup:
+                popup.reload_profile(current_profile_name)
 
     def open_settings_dialog():
         dialog = SettingsDialog(root, settings)
@@ -1790,13 +1942,72 @@ def main():
             settings.update(dialog.result)
             if popup: popup.apply_settings(settings)
 
+    def open_profile_manager():
+        nonlocal current_profile_name # 外側の変数を変更するためにnonlocalを宣言
+        
+        dialog = ProfileManagerDialog(root, current_profile_name)
+        result = dialog.result
+        
+        if result:
+            action = result['action']
+            
+            if action == 'switch':
+                current_profile_name = result['profile']
+            elif action == 'add':
+                new_profile = result['profile']
+                save_links_data([{"group": "マイリンク", "links": []}], new_profile)
+                current_profile_name = new_profile
+            elif action == 'rename':
+                old_profile_name = result['old']
+                new_profile_name = result['new']
+                old_path = get_profile_path(old_profile_name)
+                new_path = os.path.join(PROFILES_DIR, new_profile_name)
+                # 念のため、移動先が本当に存在しないか確認
+                if os.path.exists(new_path):
+                    messagebox.showerror("エラー", f"予期せぬエラー: '{new_profile_name}' は既に存在します。", parent=root)
+                    return
+                try:
+                    # os.rename を使ってディレクトリの名前を直接変更
+                    os.rename(old_path, new_path)
+                    # 現在選択中のプロファイルがリネーム対象だった場合、
+                    # current_profile_name も新しい名前に更新する
+                    if current_profile_name == old_profile_name:
+                        current_profile_name = new_profile_name
+                    messagebox.showinfo("成功", f"プロファイル名を '{old_profile_name}' から '{new_profile_name}' に変更しました。", parent=root)
+                except Exception as e:
+                    logging.error(f"Failed to rename profile directory: {e}")
+                    messagebox.showerror("エラー", f"プロファイルの名前変更中にエラーが発生しました。\n詳細はログファイルを確認してください。", parent=root)
+                    return # エラーが起きたらリロード処理に進まない
+            elif action == 'delete':
+                profile_to_delete = result['profile']
+                path_to_delete = get_profile_path(profile_to_delete)
+                shutil.rmtree(path_to_delete) # ディレクトリごと削除
+                if current_profile_name == profile_to_delete:
+                    # 削除したのが現在使用中のプロファイルなら、デフォルトに戻す
+                    current_profile_name = DEFAULT_PROFILE_NAME
+
+            # 変更をsettings.jsonに保存し、アプリ全体をリロード
+            settings['current_profile'] = current_profile_name
+            save_settings(settings)
+            reload_application_state(current_profile_name)
+
+    def reload_application_state(profile_name):
+        # LinkPopupに、新しいプロファイル名で再読み込みさせる
+        if popup:
+            popup.reload_profile(profile_name)
+        
+        # 事前キャッシュを再実行
+        threading.Thread(target=lambda: preload_all_link_icons(profile_name), daemon=True).start()
+        print(f"Switched to profile: {profile_name}")
+
+
     tray_thread = threading.Thread(target=run_tray, daemon=True)
     tray_thread.start()
     
     # --- 起動直後に全リンクのアイコンを事前キャッシュするバックグラウンドスレッド ---
-    def preload_all_link_icons():
+    def preload_all_link_icons(profile_name):
         try:
-            links_data = load_links_data()
+            links_data = load_links_data(profile_name)
             preload_sizes = [12, 16, 20, 24, 28, 32]
             for group in links_data:
                 for link in group.get('links', []):
@@ -1814,7 +2025,7 @@ def main():
                                 logging.info(f"[preload] get_file_icon failed: {path} ({size}px): {e}")
         except Exception as e:
             logging.warning(f"[preload] preload_all_link_icons failed: {e}")
-    threading.Thread(target=preload_all_link_icons, daemon=True).start()
+    threading.Thread(target=lambda: preload_all_link_icons(current_profile_name), daemon=True).start()
 
     # 1. ルートウィンドウを先に作成する
     root = tk.Tk()
@@ -1838,7 +2049,7 @@ def main():
         logging.warning(f"icon.png not found or failed to load: {e}")
         
     # 3. アイコンを読み込んだ後で、それを利用するウィジェットを作成する
-    popup = LinkPopup(root, settings)
+    popup = LinkPopup(root, settings, current_profile_name)
     
     # 4. メインループを開始
     try:
