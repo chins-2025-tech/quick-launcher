@@ -18,6 +18,7 @@ ENV/
 Thumbs.db
 
 # 設定・データファイル
+profiles/
 settings.json
 links.json
 
