@@ -28,6 +28,7 @@ import logging
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import shutil
+import subprocess
 
 # --- アプリケーション設定 ---
 logging.basicConfig(filename='app_errors.log', level=logging.ERROR,
@@ -217,7 +218,8 @@ def open_link(path):
         if path.startswith(('http://', 'https://')):
             webbrowser.open(path)
         else:
-            os.startfile(path)
+            # コマンドライン引数付きの場合は subprocess で実行
+            subprocess.Popen(path, shell=True)
     except Exception as e:
         logging.error(f"Failed to open link '{path}': {e}")
         messagebox.showerror("リンクエラー", f"リンクを開けませんでした:\n{path}")
@@ -1006,7 +1008,7 @@ class LinksEditDialog(tk.Toplevel):
         if not path:  # Noneまたは空文字列
             return
         
-        new_link = {'name': name, 'path': path}
+        new_link_data = {'name': name, 'path': path}
 
         # --- ★★★ データ同期ロジック ★★★ ---
         # 1. 表示されているグループ名を取得
@@ -1015,10 +1017,10 @@ class LinksEditDialog(tk.Toplevel):
         # 2. original_groups から該当グループを探し、そこに新しいリンクを追加
         for g in self.original_groups:
             if g['group'] == current_group_name:
-                g['links'].append(new_link.copy())
+                g['links'].append(new_link_data.copy())
                 break
         # 3. 表示用のgroupsにも追加
-        self.groups[self.selected_group]['links'].append(new_link)
+        self.groups[self.selected_group]['links'].append(new_link_data.copy())
         self.selected_link = len(self.groups[self.selected_group]['links']) - 1
 
         # --- 追加したリンクのアイコンを個別にキャッシュ取得 ---
