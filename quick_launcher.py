@@ -1494,6 +1494,7 @@ class LinkPopup(tk.Toplevel):
 
         self.reload_links()
         self.apply_settings(self.settings)
+        LinkPopup.current_icon_size = self.icon_size
 
     def apply_settings(self, settings):
         self.settings = settings.copy()
@@ -2046,23 +2047,42 @@ def main():
     def preload_all_link_icons(profile_name):
         try:
             links_data = load_links_data(profile_name)
-            preload_sizes = [12, 16, 20, 24, 28, 32]
+            if not links_data: return
+            # 1. 現在のUIで実際に使われているサイズを取得
+            # LinkPopupクラスが初期化されていれば、そこから正確なサイズを取得
+            try:
+                current_size = LinkPopup.current_icon_size
+            except AttributeError:
+                # まだLinkPopupがなければ、デフォルト設定から推測
+                font_metrics = tkfont.Font(family=settings['font'], size=settings['size']).metrics()
+                current_size = round_to_step(font_metrics.get('ascent', 16))
+
+            # 2. キャッシュするサイズのリストを作成（現在のサイズを先頭に）
+            standard_sizes = {8, 12, 16, 24, 32} # 一般的なサイズ
+            preload_sizes = sorted(list({current_size} | standard_sizes))
+
+            print(f"Preloading icons for sizes: {preload_sizes}") # デバッグ用
+
             for group in links_data:
                 for link in group.get('links', []):
                     path = link.get('path', '')
+                    if not path: continue
+                    
                     for size in preload_sizes:
-                        if path.startswith('http'):
+                        # ★ここでのアイコン取得はキャッシュ目的（UIには影響しない）
+                        if path.startswith(('http://', 'https://')):
                             try:
                                 get_web_icon(path, size=size)
-                            except Exception as e:
-                                logging.info(f"[preload] get_web_icon failed: {path} ({size}px): {e}")
+                            except Exception: # ここでのエラーはログ不要（キャッシュ試行なので）
+                                pass
                         else:
                             try:
                                 get_file_icon(path, size=size)
-                            except Exception as e:
-                                logging.info(f"[preload] get_file_icon failed: {path} ({size}px): {e}")
+                            except Exception:
+                                pass
         except Exception as e:
-            logging.warning(f"[preload] preload_all_link_icons failed: {e}")
+            logging.warning(f"[preload] Preload thread failed: {e}")
+
     threading.Thread(target=lambda: preload_all_link_icons(current_profile_name), daemon=True).start()
 
     # 1. ルートウィンドウを先に作成する
