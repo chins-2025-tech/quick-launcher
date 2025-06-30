@@ -1807,21 +1807,56 @@ class LinkPopup(tk.Toplevel):
                     win.winfo_rooty() <= y < win.winfo_rooty() + win.winfo_height())
         except tk.TclError: return False
 
-class ProfileManagerDialog(simpledialog.Dialog):
-    def __init__(self, parent, current_profile):
-        self.current_profile = current_profile
-        self.profiles = get_all_profile_names()
-        self.result = None
-        super().__init__(parent, "プロファイルの管理")
+# ProfileManagerDialogクラス
 
-    def body(self, master):
+class ProfileManagerDialog(tk.Toplevel): # LinksEditDialogと同じくToplevelを継承
+    def __init__(self, parent, current_profile):
+        super().__init__(parent)
+
+        # --- ウィンドウの基本設定 ---
+        self.title("プロファイルの管理")
         if 'app_icon' in globals() and app_icon:
             self.iconphoto(True, app_icon)
-        
         self.resizable(False, False)
+
+        # --- 状態変数 ---
+        self.current_profile = current_profile
+        self.result = None # メインロジックに返す結果
         
-        list_frame = tk.Frame(master, bd=1, relief=tk.SOLID)
-        list_frame.pack(padx=10, pady=10, expand=True, fill="both")
+        # --- UIの構築 ---
+        self.create_widgets()
+
+        # --- イベントバインド ---
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.bind("<Escape>", lambda e: self.cancel())
+
+        # --- 初期化と表示 (LinksEditDialogの表示ロジックを完全にコピー) ---
+        self.refresh_list()
+        
+        # 1. スクリーン中央に配置
+        self.update_idletasks()
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        win_w = self.winfo_reqwidth()
+        win_h = self.winfo_reqheight()
+        x = (screen_w // 2) - (win_w // 2)
+        y = (screen_h // 2) - (win_h // 2)
+        self.geometry(f'{win_w}x{win_h}+{x}+{y}')
+
+        # 2. 表示、モーダル化、待機
+        self.deiconify()
+        self.lift()
+        self.focus_set()
+        self.grab_set()
+        self.wait_window(self)
+
+    def create_widgets(self):
+        """ウィジェットの作成と配置"""
+        main_frame = tk.Frame(self, padx=10, pady=10)
+        main_frame.pack(expand=True, fill="both")
+
+        list_frame = tk.Frame(main_frame, bd=1, relief=tk.SOLID)
+        list_frame.pack(expand=True, fill="both", pady=(0, 10))
         
         scrollbar = tk.Scrollbar(list_frame)
         scrollbar.pack(side="right", fill="y")
@@ -1829,7 +1864,43 @@ class ProfileManagerDialog(simpledialog.Dialog):
         self.listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, exportselection=False, height=10)
         self.listbox.pack(side="left", expand=True, fill="both")
         scrollbar.config(command=self.listbox.yview)
+        self.listbox.bind("<Double-Button-1>", lambda e: self.switch_and_close())
 
+        ops_btn_frame = tk.Frame(main_frame)
+        ops_btn_frame.pack(fill="x", pady=(0, 10))
+        
+        tk.Button(ops_btn_frame, text="追加", command=self.add_profile).pack(side="left", padx=2)
+        tk.Button(ops_btn_frame, text="名前変更", command=self.rename_profile).pack(side="left", padx=2)
+        tk.Button(ops_btn_frame, text="削除", command=self.delete_profile).pack(side="left", padx=2)
+        
+        bottom_frame = tk.Frame(main_frame)
+        bottom_frame.pack(fill="x")
+        
+        self.switch_button = tk.Button(bottom_frame, text="選択して切り替え", command=self.switch_and_close, default=tk.ACTIVE)
+        self.switch_button.pack(side="left")
+        
+        self.close_button = tk.Button(bottom_frame, text="閉じる", command=self.cancel)
+        self.close_button.pack(side="right")
+
+    def cancel(self):
+        self.result = None # 結果をNoneに設定
+        self.destroy()
+        
+    def switch_and_close(self):
+        selected = self.get_selected_profile()
+        if selected:
+            self.result = {"action": "switch", "profile": selected}
+            self.destroy()
+        else:
+             messagebox.showwarning("警告", "切り替えるプロファイルを選択してください。", parent=self)
+
+    # ... (refresh_list, get_selected_profile, add_profile, rename_profile, delete_profile は変更なし) ...
+
+    def refresh_list(self):
+        """リストボックスの内容を更新する"""
+        self.listbox.delete(0, tk.END)
+        self.profiles = get_all_profile_names()
+        
         for p_name in self.profiles:
             display_name = p_name
             if p_name == self.current_profile:
@@ -1838,22 +1909,12 @@ class ProfileManagerDialog(simpledialog.Dialog):
             if p_name == self.current_profile:
                 self.listbox.itemconfig(tk.END, {'bg': '#e0e0e0'})
         
-        # 初期選択
         try:
             current_idx = self.profiles.index(self.current_profile)
             self.listbox.select_set(current_idx)
-        except ValueError:
+            self.listbox.see(current_idx)
+        except (ValueError, IndexError):
             pass
-
-        btn_frame = tk.Frame(master)
-        btn_frame.pack(padx=10, pady=(0, 10), fill="x")
-        
-        tk.Button(btn_frame, text="選択して切り替え", command=self.switch_profile).pack(side="left", padx=2)
-        tk.Button(btn_frame, text="追加", command=self.add_profile).pack(side="left", padx=2)
-        tk.Button(btn_frame, text="名前変更", command=self.rename_profile).pack(side="left", padx=2)
-        tk.Button(btn_frame, text="削除", command=self.delete_profile).pack(side="left", padx=2)
-        
-        return self.listbox
 
     def get_selected_profile(self):
         selected_indices = self.listbox.curselection()
@@ -1861,65 +1922,66 @@ class ProfileManagerDialog(simpledialog.Dialog):
             return None
         return self.profiles[selected_indices[0]]
 
-    def switch_profile(self):
-        selected = self.get_selected_profile()
-        if selected:
-            self.result = {"action": "switch", "profile": selected}
-            self.ok()
-
     def add_profile(self):
         new_name = simpledialog.askstring("新規プロファイル", "新しいプロファイル名:", parent=self)
         if new_name and new_name not in self.profiles:
-            self.result = {"action": "add", "profile": new_name}
-            self.ok()
+            save_links_data([{"group": "マイリンク", "links": []}], new_name)
+            self.refresh_list()
+            try:
+                new_idx = self.profiles.index(new_name)
+                self.listbox.select_clear(0, tk.END)
+                self.listbox.select_set(new_idx)
+                self.listbox.see(new_idx)
+            except (ValueError, IndexError):
+                pass
         elif new_name:
             messagebox.showerror("エラー", "その名前は既に使用されています。", parent=self)
 
     def rename_profile(self):
-        # 1. プロファイルが選択されているかチェック
         selected = self.get_selected_profile()
-        if not selected:
-            messagebox.showwarning("警告", "名前を変更するプロファイルを選択してください。", parent=self)
+        if not selected or selected == DEFAULT_PROFILE_NAME:
+            messagebox.showerror("エラー", "デフォルトプロファイルの名前は変更/削除できません。", parent=self)
             return
             
-        # 2. デフォルトプロファイルは変更不可
-        if selected == DEFAULT_PROFILE_NAME:
-            messagebox.showerror("エラー", "デフォルトプロファイルの名前は変更できません。", parent=self)
-            return
-            
-        # 3. 新しい名前をユーザーから入力してもらう
         new_name = simpledialog.askstring("名前の変更", f"'{selected}' の新しい名前:", initialvalue=selected, parent=self)
-        
-        # 4. 入力の検証
-        if not new_name or new_name == selected:
-            # キャンセルされたか、名前が変わっていない場合は何もしない
-            return
-            
-        if new_name in self.profiles:
-            # 新しい名前が既に存在する場合
-            messagebox.showerror("エラー", f"プロファイル名 '{new_name}' は既に使用されています。", parent=self)
+        if not new_name or new_name == selected or new_name in self.profiles:
             return
 
-        # 5. 結果を辞書に格納してダイアログを閉じる
-        self.result = {"action": "rename", "old": selected, "new": new_name}
-        self.ok()
+        old_path = get_profile_path(selected)
+        new_path = os.path.join(PROFILES_DIR, new_name)
+        try:
+            os.rename(old_path, new_path)
+            if self.current_profile == selected:
+                self.current_profile = new_name
+                # ここでメインのsettingsを直接変更するのではなく、結果を返す
+                if self.result is None: self.result = {}
+                self.result['current_profile_renamed'] = new_name
+            
+            self.refresh_list()
+            messagebox.showinfo("成功", "名前を変更しました。", parent=self)
+        except Exception as e:
+            logging.error(f"Failed to rename profile: {e}")
+            messagebox.showerror("エラー", "名前の変更に失敗しました。", parent=self)
 
     def delete_profile(self):
         selected = self.get_selected_profile()
-        if not selected:
-            messagebox.showwarning("警告", "プロファイルを選択してください。", parent=self)
-            return
-        if selected == DEFAULT_PROFILE_NAME:
-            messagebox.showerror("エラー", "デフォルトプロファイルは削除できません。", parent=self)
+        if not selected or selected == DEFAULT_PROFILE_NAME:
+            messagebox.showerror("エラー", "デフォルトプロファイルの名前は変更/削除できません。", parent=self)
             return
             
         if messagebox.askyesno("確認", f"プロファイル '{selected}' を削除しますか？\nこの操作は元に戻せません。", parent=self):
-            self.result = {"action": "delete", "profile": selected}
-            self.ok()
-            
-    def buttonbox(self):
-        # OK/Cancelボタンは不要なので、何もしないようにオーバーライド
-        pass
+            try:
+                path_to_delete = get_profile_path(selected)
+                shutil.rmtree(path_to_delete)
+                if self.current_profile == selected:
+                    self.current_profile = DEFAULT_PROFILE_NAME
+                    if self.result is None: self.result = {}
+                    self.result['current_profile_deleted'] = True
+
+                self.refresh_list()
+            except Exception as e:
+                logging.error(f"Failed to delete profile: {e}")
+                messagebox.showerror("エラー", "削除に失敗しました。", parent=self)
 
 def ellipsize_text(text, font_obj, max_width):
     if font_obj.measure(text) <= max_width:
@@ -2028,53 +2090,27 @@ def main():
             if popup: popup.apply_settings(settings)
 
     def open_profile_manager():
-        nonlocal current_profile_name # 外側の変数を変更するためにnonlocalを宣言
+        nonlocal current_profile_name
         
         dialog = ProfileManagerDialog(root, current_profile_name)
         result = dialog.result
-        
-        if result:
-            action = result['action']
-            
-            if action == 'switch':
-                current_profile_name = result['profile']
-            elif action == 'add':
-                new_profile = result['profile']
-                save_links_data([{"group": "マイリンク", "links": []}], new_profile)
-                current_profile_name = new_profile
-            elif action == 'rename':
-                old_profile_name = result['old']
-                new_profile_name = result['new']
-                old_path = get_profile_path(old_profile_name)
-                new_path = os.path.join(PROFILES_DIR, new_profile_name)
-                # 念のため、移動先が本当に存在しないか確認
-                if os.path.exists(new_path):
-                    messagebox.showerror("エラー", f"予期せぬエラー: '{new_profile_name}' は既に存在します。", parent=root)
-                    return
-                try:
-                    # os.rename を使ってディレクトリの名前を直接変更
-                    os.rename(old_path, new_path)
-                    # 現在選択中のプロファイルがリネーム対象だった場合、
-                    # current_profile_name も新しい名前に更新する
-                    if current_profile_name == old_profile_name:
-                        current_profile_name = new_profile_name
-                    messagebox.showinfo("成功", f"プロファイル名を '{old_profile_name}' から '{new_profile_name}' に変更しました。", parent=root)
-                except Exception as e:
-                    logging.error(f"Failed to rename profile directory: {e}")
-                    messagebox.showerror("エラー", f"プロファイルの名前変更中にエラーが発生しました。\n詳細はログファイルを確認してください。", parent=root)
-                    return # エラーが起きたらリロード処理に進まない
-            elif action == 'delete':
-                profile_to_delete = result['profile']
-                path_to_delete = get_profile_path(profile_to_delete)
-                shutil.rmtree(path_to_delete) # ディレクトリごと削除
-                if current_profile_name == profile_to_delete:
-                    # 削除したのが現在使用中のプロファイルなら、デフォルトに戻す
-                    current_profile_name = DEFAULT_PROFILE_NAME
 
-            # 変更をsettings.jsonに保存し、アプリ全体をリロード
-            settings['current_profile'] = current_profile_name
-            save_settings(settings)
-            reload_application_state(current_profile_name)
+        if result:
+            profile_switched = False
+            new_profile = current_profile_name
+
+            if result.get('action') == 'switch':
+                new_profile = result['profile']
+            elif 'current_profile_renamed' in result:
+                new_profile = result['current_profile_renamed']
+            elif 'current_profile_deleted' in result:
+                new_profile = DEFAULT_PROFILE_NAME
+            
+            if new_profile != current_profile_name:
+                current_profile_name = new_profile
+                settings['current_profile'] = current_profile_name
+                save_settings(settings)
+                reload_application_state(current_profile_name)
 
     def reload_application_state(profile_name):
         # LinkPopupに、新しいプロファイル名で再読み込みさせる
