@@ -1264,8 +1264,8 @@ class LinksEditDialog(tk.Toplevel):
             return
         links = self.groups[self.selected_group]['links']
 
-        # クリックされたY座標から、何番目のリンクかを計算
-        idx = (event.y - 2) // self.link_row_height
+        canvas_y = self.link_canvas.canvasy(event.y)
+        idx = int((canvas_y - 2) / self.link_row_height)
         
         if 0 <= idx < len(links):
             # 有効なリンクがクリックされた場合
@@ -1274,7 +1274,12 @@ class LinksEditDialog(tk.Toplevel):
                 self.selected_link = None
             else:
                 self.selected_link = idx
-            self.link_addr_var.set(links[self.selected_link]['path'] if self.selected_link is not None else "")
+            
+            # 選択されたリンクのパスをEntryに表示する
+            if self.selected_link is not None:
+                self.link_addr_var.set(links[self.selected_link]['path'])
+            else:
+                self.link_addr_var.set("")
         else:
             # リンク以外の場所（空白領域）がクリックされた場合は選択を解除
             self.selected_link = None
@@ -1282,11 +1287,17 @@ class LinksEditDialog(tk.Toplevel):
             
         # 選択状態が変わったので、Canvasを再描画してハイライトを更新
         self.refresh_link_list()
+        # ボタンの状態も更新
         self._update_buttons_state()
 
     def on_link_canvas_double(self, event):
-        idx = (event.y - 2) // self.link_row_height
+        if not self.groups or self.selected_group is None:
+            return
         links = self.groups[self.selected_group]['links']
+        
+        canvas_y = self.link_canvas.canvasy(event.y)
+        idx = int((canvas_y - 2) / self.link_row_height)
+        
         if 0 <= idx < len(links):
             path = links[idx]['path']
             open_link(path)
