@@ -29,6 +29,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import shutil
 import subprocess
+import copy
 
 # --- アプリケーション設定 ---
 logging.basicConfig(filename='app_errors.log', level=logging.ERROR,
@@ -896,9 +897,9 @@ class LinksEditDialog(tk.Toplevel):
         if name:
             new_group = {'group': name, 'links': []}
             # 元データに追加
-            self.original_groups.append(new_group)
+            self.original_groups.append(copy.deepcopy(new_group))
             # 表示データにも追加
-            self.groups.append(new_group.copy())
+            self.groups.append(copy.deepcopy(new_group))
 
             self.selected_group = len(self.groups) - 1
             self.refresh_group_list()
