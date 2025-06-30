@@ -221,7 +221,12 @@ def open_link(path):
             webbrowser.open(path)
         else:
             # コマンドライン引数付きの場合は subprocess で実行
-            subprocess.Popen(path, shell=True)
+            # フォルダパスの場合は explorer.exe で開く（ネットワークパス対応）
+            if os.path.isdir(path):
+                # フォルダ（ローカル/ネットワーク両方）を explorer.exe で開く
+                subprocess.Popen(['explorer', os.path.abspath(path)])
+            else:
+                subprocess.Popen(path, shell=True)
     except Exception as e:
         logging.error(f"Failed to open link '{path}': {e}")
         messagebox.showerror("リンクエラー", f"リンクを開けませんでした:\n{path}")
