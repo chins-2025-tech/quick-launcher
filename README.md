@@ -1,4 +1,4 @@
-# QuickLauncherProject
+# QuickLauncher
 
 Windows用クイックランチャー（Python/Tkinter）
 
@@ -17,6 +17,7 @@ Windows用クイックランチャー（Python/Tkinter）
 - ポップアップUIでグループ→リンクを素早く選択
 - システム・Webアイコン自動取得
 - 設定画面でフォント・色・アイコン取得方法などカスタマイズ
+- プロファイル機能で用途(仕事、娯楽など)で切り替え可能
 
 ## 使い方
 
@@ -35,16 +36,12 @@ Windows用クイックランチャー（Python/Tkinter）
 ## ビルド（PyInstaller）
 
 ```sh
-pyinstaller --noconsole --onefile --icon=icon.ico --add-data "icon.png;." quick_launcher.py
+pyinstaller --noconsole --onefile --icon=icon.ico quick_launcher.py
 ```
 
 - 実行ファイル（exe）と同じフォルダに `icon.png` を配置すると、
   トレイアイコンやウィンドウアイコンとして自動的に `icon.png` が使用されます。
   （icoはPyInstaller用、pngはアプリ実行時の表示用です）
-
-## 除外ファイル
-
-- 仮想環境・ビルド生成物・settings.json/links.json などは `.gitignore` で除外しています。
 
 ## ライセンス
 
