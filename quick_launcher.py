@@ -30,6 +30,7 @@ from urllib.parse import urljoin
 import shutil
 import subprocess
 import copy
+import re
 
 # --- アプリケーション設定 ---
 logging.basicConfig(filename='app_errors.log', level=logging.ERROR,
@@ -365,21 +366,49 @@ def get_system_warning_icon(size=16):
     _system_icon_cache[key] = tk_icon
     return tk_icon
 
+def extract_executable_path(command_line):
+    """
+    コマンドライン文字列から実行可能ファイルのパスを抽出する。
+    """
+    command_line = command_line.strip()
+    
+    # 1. ダブルクォーテーションで囲まれている場合（最優先）
+    if command_line.startswith('"'):
+        match = re.match(r'"(.*?)"', command_line) # 非貪欲マッチに変更
+        if match:
+            path_candidate = match.group(1)
+            # 抽出したパスが実際に存在するか確認
+            if os.path.exists(path_candidate):
+                return path_candidate
+            
+    # 2. ダブルクォーテーションがない場合
+    parts = command_line.split()
+    # 後ろから前に向かって、存在するパスを探す
+    for i in range(len(parts), 0, -1):
+        path_candidate = " ".join(parts[:i])
+        if os.path.exists(path_candidate):
+            # 最初に見つかった（＝最も長い）存在するパスを返す
+            return path_candidate
+            
+    # 3. それでも見つからない場合は、元の文字列をそのまま返す
+    return command_line
+
 def get_file_icon(path, size=16):
     """ファイルパスからアイコンを取得する。パスが存在しない場合は警告アイコンを返す。"""
+    executable_path = extract_executable_path(path)
 
     # サイズに応じたフラグを決定する
     if size > 20:
         flags = 0x100 | 0x0
     else:
         flags = 0x100 | 0x1
-    key = (path, size, flags)
+    key = (executable_path, size, flags)
     # まず、キャッシュを確認
     if key in _icon_cache:
         return _icon_cache[key]
 
     # ファイル/フォルダの存在を確認
-    file_exists = os.path.exists(path)
+    file_exists = os.path.exists(executable_path)
     # ファイル・フォルダが存在しない場合は警告アイコンを返す
     if not file_exists:
         tk_icon = get_system_warning_icon(size)
@@ -387,18 +416,18 @@ def get_file_icon(path, size=16):
         return tk_icon
 
     info = SHFILEINFO()
-    res = shell32.SHGetFileInfoW(path, 0, ctypes.byref(info), ctypes.sizeof(info), flags)
+    res = shell32.SHGetFileInfoW(executable_path, 0, ctypes.byref(info), ctypes.sizeof(info), flags)
 
     tk_icon = None
     if res and info.hIcon:
         tk_icon = _hicon_to_photoimage(info.hIcon, size)
     else:
         # exeの場合はExtractIconExで直接抽出
-        if path.lower().endswith('.exe'):
+        if executable_path.lower().endswith('.exe'):
             try:
                 large = ctypes.c_void_p()
                 small = ctypes.c_void_p()
-                num_icons = shell32.ExtractIconExW(path, 0, ctypes.byref(large), ctypes.byref(small), 1)
+                num_icons = shell32.ExtractIconExW(executable_path, 0, ctypes.byref(large), ctypes.byref(small), 1)
                 hIcon = None
                 if size > 20 and large.value:
                     hIcon = large.value
@@ -407,13 +436,13 @@ def get_file_icon(path, size=16):
                 if hIcon:
                     tk_icon = _hicon_to_photoimage(hIcon, size, destroy_after=True)
             except Exception as e:
-                logging.info(f"[get_file_icon] ExtractIconEx failed: {path}: {e}")
+                logging.info(f"[get_file_icon] ExtractIconEx failed: {executable_path}: {e}")
         # 拡張子からアイコン取得（jpg, mp4, txt, pdf等）
         if tk_icon is None:
             SHGFI_ICON = 0x100
             SHGFI_SMALLICON = 0x1
             SHGFI_USEFILEATTRIBUTES = 0x10
-            ext = os.path.splitext(path)[1]
+            ext = os.path.splitext(executable_path)[1]
             if ext:
                 dummy_name = f"dummy{ext}"
                 attr = 0x80  # FILE_ATTRIBUTE_NORMAL
@@ -426,6 +455,7 @@ def get_file_icon(path, size=16):
         tk_icon = get_system_folder_icon(size)
 
     _icon_cache[key] = tk_icon
+
     return tk_icon
 
 def get_web_icon(url, size=16):
@@ -1176,11 +1206,12 @@ class LinksEditDialog(tk.Toplevel):
                 key = (domain, self.link_icon_size)
                 icon = _icon_cache.get(key)
             else:
+                executable_path = extract_executable_path(path)
                 if self.link_icon_size > 20:
                     flags = 0x100 | 0x0
                 else:
                     flags = 0x100 | 0x1
-                key = (path, self.link_icon_size, flags)
+                key = (executable_path, self.link_icon_size, flags)
                 icon = _icon_cache.get(key)
             if not icon:
                 icon = _create_fallback_icon(self.link_icon_size)
@@ -1712,11 +1743,12 @@ class LinkPopup(tk.Toplevel):
                 if not icon:
                     icon = _create_fallback_icon(self.icon_size)
             else:
+                executable_path = extract_executable_path(path)
                 if self.icon_size > 20:
                     flags = 0x100 | 0x0
                 else:
                     flags = 0x100 | 0x1
-                key = (path, self.icon_size, flags)
+                key = (executable_path, self.icon_size, flags)
                 icon = _icon_cache.get(key)
                 if not icon:
                     icon = _create_fallback_icon(self.icon_size)
@@ -2063,8 +2095,6 @@ def main():
             # 2. キャッシュするサイズのリストを作成（現在のサイズを先頭に）
             standard_sizes = {8, 12, 16, 24, 32} # 一般的なサイズ
             preload_sizes = sorted(list({current_size} | standard_sizes))
-
-            print(f"Preloading icons for sizes: {preload_sizes}") # デバッグ用
 
             for group in links_data:
                 for link in group.get('links', []):
