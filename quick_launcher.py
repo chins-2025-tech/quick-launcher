@@ -1,7 +1,7 @@
 """
 quick_launcher.py - A simple and customizable quick launcher application for Windows.
 
-author: shinrei chin
+author: Shinrei Chin
 version: 1.0.0
 date: 2025-6-30
 """
@@ -632,7 +632,7 @@ class SettingsDialog(simpledialog.Dialog):
         self.default_btn.grid(row=6, column=0, columnspan=2, pady=10)
 
         # --- 作成者ラベル ---
-        author_label = tk.Label(master, text="作成者: shinrei.chin", anchor="w", fg="#888888", font=("Yu Gothic UI", 8))
+        author_label = tk.Label(master, text="by Shinrei Chin", anchor="w", fg="#888888", font=("Yu Gothic UI", 8))
         author_label.grid(row=7, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 5))
 
         return self.font_combo
