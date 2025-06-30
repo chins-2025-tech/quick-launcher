@@ -2008,11 +2008,13 @@ def main():
         except (AttributeError, OSError):
             logging.warning("Failed to set DPI awareness.")
 
-    global root, popup, settings, app_icon
+    global root, popup, settings, app_icon, is_dialog_open
 
-    # --- ★★★ アプリケーション起動時の処理 ★★★ ---
+    # --- アプリケーション起動時の処理 ---
     # 1. 設定ファイルを読み込む
     settings = load_settings()
+
+    is_dialog_open = False
 
     # 2. デフォルトプロファイルが存在するか確認し、なければ作成
     if not os.path.exists(get_profile_path(DEFAULT_PROFILE_NAME)):
@@ -2075,42 +2077,61 @@ def main():
             root.destroy()
 
     def open_links_editor():
-        links_data = load_links_data(current_profile_name)
-        dialog = LinksEditDialog(root, links_data, settings)
-        if dialog.result is not None:
-            save_links_data(dialog.result, current_profile_name)
-            if popup:
-                popup.reload_profile(current_profile_name)
+        global is_dialog_open # グローバル変数を変更するために宣言
+        if is_dialog_open: return
+        try:
+            is_dialog_open = True
+            
+            links_data = load_links_data(current_profile_name)
+            dialog = LinksEditDialog(root, links_data, settings)
+            if dialog.result is not None:
+                save_links_data(dialog.result, current_profile_name)
+                if popup:
+                    popup.reload_profile(current_profile_name)
+        finally:
+            is_dialog_open = False
 
     def open_settings_dialog():
-        dialog = SettingsDialog(root, settings)
-        if dialog.result is not None:
-            settings.clear()
-            settings.update(dialog.result)
-            if popup: popup.apply_settings(settings)
+        global is_dialog_open
+        if is_dialog_open: return
+        try:
+            is_dialog_open = True
+            dialog = SettingsDialog(root, settings)
+            if dialog.result is not None:
+                settings.clear()
+                settings.update(dialog.result)
+                if popup: popup.apply_settings(settings)
+        finally:
+            is_dialog_open = False
 
     def open_profile_manager():
         nonlocal current_profile_name
+        global is_dialog_open
+        if is_dialog_open: return
         
-        dialog = ProfileManagerDialog(root, current_profile_name)
-        result = dialog.result
+        try:
+            is_dialog_open = True
+            dialog = ProfileManagerDialog(root, current_profile_name)
+            result = dialog.result
 
-        if result:
-            profile_switched = False
-            new_profile = current_profile_name
+            if result:
+                profile_switched = False
+                new_profile = current_profile_name
 
-            if result.get('action') == 'switch':
-                new_profile = result['profile']
-            elif 'current_profile_renamed' in result:
-                new_profile = result['current_profile_renamed']
-            elif 'current_profile_deleted' in result:
-                new_profile = DEFAULT_PROFILE_NAME
-            
-            if new_profile != current_profile_name:
-                current_profile_name = new_profile
-                settings['current_profile'] = current_profile_name
-                save_settings(settings)
-                reload_application_state(current_profile_name)
+                if result.get('action') == 'switch':
+                    new_profile = result['profile']
+                elif 'current_profile_renamed' in result:
+                    new_profile = result['current_profile_renamed']
+                elif 'current_profile_deleted' in result:
+                    new_profile = DEFAULT_PROFILE_NAME
+                
+                if new_profile != current_profile_name:
+                    current_profile_name = new_profile
+                    settings['current_profile'] = current_profile_name
+                    save_settings(settings)
+                    reload_application_state(current_profile_name)
+        finally:
+            is_dialog_open = False  
 
     def reload_application_state(profile_name):
         # LinkPopupに、新しいプロファイル名で再読み込みさせる
