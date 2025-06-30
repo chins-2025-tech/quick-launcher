@@ -1947,7 +1947,7 @@ def main():
         def settings_action(icon=None): root.after(0, open_settings_dialog)
         def exit_action(icon, item):
             icon.stop()
-            root.quit()
+            root.destroy()
 
         # --- 3. メニューとアイコンの作成・実行 ---
         try:
@@ -1963,8 +1963,8 @@ def main():
         except Exception as e:
             # Iconの作成やrun()自体が失敗するような致命的なエラー
             logging.error(f"Failed to run tray icon: {e}", exc_info=True)
-            # この場合、アプリは終了するしかない
-            root.quit()
+            if not root.winfo_exists(): return
+            root.destroy()
 
     def open_links_editor():
         links_data = load_links_data(current_profile_name)
