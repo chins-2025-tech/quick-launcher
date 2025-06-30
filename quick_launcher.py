@@ -691,6 +691,9 @@ class LinksEditDialog(tk.Toplevel):
         self.modified = False  # 変更フラグ
         self.is_searching = False
 
+        self.drag_data = {"type": None, "start_index": -1, "widget": None}
+        self.drag_indicator_id = None # ガイドラインのID
+
         # ウィンドウクローズ時のハンドラ
         self.protocol("WM_DELETE_WINDOW", self.cancel)
 
@@ -769,6 +772,9 @@ class LinksEditDialog(tk.Toplevel):
         self.group_listbox.place_configure(relwidth=1.0, bordermode='outside', width=-group_scrollbar.winfo_reqwidth())
         
         self.group_listbox.bind('<<ListboxSelect>>', self.on_group_select)
+        self.group_listbox.bind("<ButtonPress-1>", self._on_press)
+        self.group_listbox.bind("<B1-Motion>", self._on_motion)
+        self.group_listbox.bind("<ButtonRelease-1>", self._on_release)
 
         self.no_results_label = tk.Label(group_list_frame, text="検索結果がありません", font=content_font, fg="gray")
         # ★★★ placeを使って重ねて配置 ★★★
@@ -831,8 +837,10 @@ class LinksEditDialog(tk.Toplevel):
         link_scrollbar.grid(row=0, column=1, sticky="ns")
         self.link_canvas.bind("<Configure>", lambda e: self.refresh_link_list())
         self.link_canvas.bind("<MouseWheel>", self._on_link_canvas_mousewheel)
-        self.link_canvas.bind("<Button-1>", self.on_link_canvas_click)
         self.link_canvas.bind("<Double-Button-1>", self.on_link_canvas_double)
+        self.link_canvas.bind("<ButtonPress-1>", self._on_press)
+        self.link_canvas.bind("<B1-Motion>", self._on_motion)
+        self.link_canvas.bind("<ButtonRelease-1>", self._on_release)
 
         # --- リンク操作ボタン ---
         self.link_btns_frame = tk.Frame(link_pane)
@@ -1258,38 +1266,6 @@ class LinksEditDialog(tk.Toplevel):
             self.refresh_link_list()
             self.link_canvas.config(state="normal")
 
-    def on_link_canvas_click(self, event):
-        # 現在表示されているグループのリンク一覧を取得
-        if not self.groups or self.selected_group is None:
-            return
-        links = self.groups[self.selected_group]['links']
-
-        canvas_y = self.link_canvas.canvasy(event.y)
-        idx = int((canvas_y - 2) / self.link_row_height)
-        
-        if 0 <= idx < len(links):
-            # 有効なリンクがクリックされた場合
-            if self.selected_link == idx:
-                # すでに選択されている項目を再度クリックした場合は選択を解除
-                self.selected_link = None
-            else:
-                self.selected_link = idx
-            
-            # 選択されたリンクのパスをEntryに表示する
-            if self.selected_link is not None:
-                self.link_addr_var.set(links[self.selected_link]['path'])
-            else:
-                self.link_addr_var.set("")
-        else:
-            # リンク以外の場所（空白領域）がクリックされた場合は選択を解除
-            self.selected_link = None
-            self.link_addr_var.set("")
-            
-        # 選択状態が変わったので、Canvasを再描画してハイライトを更新
-        self.refresh_link_list()
-        # ボタンの状態も更新
-        self._update_buttons_state()
-
     def on_link_canvas_double(self, event):
         if not self.groups or self.selected_group is None:
             return
@@ -1506,6 +1482,147 @@ class LinksEditDialog(tk.Toplevel):
         dialog.grab_set()  # ここでgrab_set
         parent.wait_window(dialog)
         return result[0] if result else None
+
+    # --- D&D と クリック処理 ---
+
+    def _on_press(self, event):
+        """マウスボタンが押された時の処理 (グループとリンク共通)"""
+        widget = event.widget
+        self.drag_data = {"type": None, "start_index": -1, "widget": widget, "is_dragging": False}
+
+        if widget == self.group_listbox:
+            index = widget.nearest(event.y)
+            if index != -1:
+                self.drag_data["type"] = "group"
+                self.drag_data["start_index"] = index
+        
+        elif widget == self.link_canvas:
+            canvas_y = widget.canvasy(event.y)
+            index = int((canvas_y - 2) / self.link_row_height)
+            if 0 <= index < len(self.groups[self.selected_group]['links']):
+                self.drag_data["type"] = "link"
+                self.drag_data["start_index"] = index
+
+    def _on_motion(self, event):
+        """マウスボタンを押しながら移動した時の処理"""
+        if not self.drag_data.get("type"):
+            return
+            
+        # motionが発生したら、それはドラッグであると確定
+        self.drag_data["is_dragging"] = True
+        
+        # 検索中はガイドラインを表示しない
+        if self.is_searching:
+            return
+
+        widget = self.drag_data["widget"]
+        
+        # ガイドラインを一旦削除
+        if self.drag_indicator_id:
+            # ウィジェットが異なるとdeleteできないので、元のウィジェットで削除
+            if self.drag_indicator_owner:
+                self.drag_indicator_owner.delete(self.drag_indicator_id)
+            self.drag_indicator_id = None
+            self.drag_indicator_owner = None
+
+        if self.drag_data["type"] == "group":
+            current_index = widget.nearest(event.y)
+            if current_index != -1:
+                widget.activate(current_index)
+        
+        elif self.drag_data["type"] == "link":
+            canvas_y = widget.canvasy(event.y)
+            current_index = int((canvas_y + self.link_row_height / 2) / self.link_row_height)
+            y = (current_index * self.link_row_height) + 1
+            canvas_width = widget.winfo_width()
+            self.drag_indicator_id = widget.create_line(0, y, canvas_width, y, fill="#0078d4", width=2)
+            self.drag_indicator_owner = widget
+
+    def _on_release(self, event):
+        """マウスボタンが離された時の処理"""
+        if not self.drag_data.get("type"):
+            return
+
+        # --- D&Dのドロップ処理 ---
+        if self.drag_data.get("is_dragging") and not self.is_searching:
+            self._handle_drop(event)
+        
+        # --- 通常のクリック処理 ---
+        else:
+            self._handle_click(event)
+
+        # 状態をリセット
+        self.drag_data = {"type": None, "start_index": -1, "widget": None, "is_dragging": False}
+        if self.drag_indicator_id and self.drag_indicator_owner:
+            self.drag_indicator_owner.delete(self.drag_indicator_id)
+            self.drag_indicator_id = None
+            self.drag_indicator_owner = None
+
+    def _handle_click(self, event):
+        """通常のクリック選択を処理する"""
+        drag_type = self.drag_data["type"]
+        index = self.drag_data["start_index"]
+        
+        if drag_type == "group":
+            # Listboxは<<ListboxSelect>>イベントで処理されるので、ここでは何もしなくて良い
+            pass
+        elif drag_type == "link":
+            if index != -1:
+                if self.selected_link == index:
+                    self.selected_link = None # 再クリックで選択解除
+                else:
+                    self.selected_link = index
+                self.refresh_link_list()
+                self._update_buttons_state()
+            else: # 空白部分のクリック
+                self.selected_link = None
+                self.refresh_link_list()
+                self._update_buttons_state()
+    
+    def _handle_drop(self, event):
+        """ドロップ操作による並べ替えを処理する"""
+        drag_type = self.drag_data["type"]
+        start_index = self.drag_data["start_index"]
+        widget = event.widget
+        
+        if drag_type == "group":
+            end_index = widget.nearest(event.y)
+            if end_index != -1 and start_index != end_index:
+                item = self.original_groups.pop(start_index)
+                if end_index > start_index: end_index -= 1
+                self.original_groups.insert(end_index, item)
+                self.groups = copy.deepcopy(self.original_groups)
+                self.selected_group = end_index
+                self.modified = True
+                self.refresh_group_list()
+            # 選択状態を再設定
+            if self.selected_group is not None:
+                self.group_listbox.select_set(self.selected_group)
+        
+        elif drag_type == "link":
+            canvas_y = widget.canvasy(event.y)
+            end_index = int((canvas_y + self.link_row_height / 2) / self.link_row_height)
+            
+            group_name = self.groups[self.selected_group]['group']
+            target_group = next((g for g in self.original_groups if g['group'] == group_name), None)
+            
+            if target_group and end_index != -1:
+                links = target_group['links']
+                end_index = max(0, min(end_index, len(links)))
+                
+                # pop, insertする前にend_indexを調整
+                effective_end_index = end_index
+                if start_index < end_index:
+                    effective_end_index -= 1
+
+                if start_index != effective_end_index:
+                    item = links.pop(start_index)
+                    links.insert(end_index, item)
+                    
+                    self.groups = copy.deepcopy(self.original_groups)
+                    self.selected_link = end_index if end_index <= len(links) else len(links) -1
+                    self.modified = True
+                    self.refresh_link_list()
 
 class LinkPopup(tk.Toplevel):
     # --- レイアウト定数 ---
@@ -1806,8 +1923,6 @@ class LinkPopup(tk.Toplevel):
             return (win.winfo_rootx() <= x < win.winfo_rootx() + win.winfo_width() and
                     win.winfo_rooty() <= y < win.winfo_rooty() + win.winfo_height())
         except tk.TclError: return False
-
-# ProfileManagerDialogクラス
 
 class ProfileManagerDialog(tk.Toplevel): # LinksEditDialogと同じくToplevelを継承
     def __init__(self, parent, current_profile):
