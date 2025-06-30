@@ -1052,16 +1052,19 @@ class LinksEditDialog(tk.Toplevel):
         name = simpledialog.askstring("リンク名", "新しいリンク名:", initialvalue=default_name, parent=self)
         if not name:  # Noneまたは空文字列
             return
+        # --- 重複チェック ---
+        current_group_links = self.groups[self.selected_group]['links']
+        if any(link['name'] == name for link in current_group_links):
+            messagebox.showerror("エラー", f"同じグループ内に同じ名前のリンクが既に存在します。", parent=self)
+            return
         path = self.ask_dialog(self, "リンク先", "リンク先パスまたはURL:", initialvalue=default_path)
         if not path:  # Noneまたは空文字列
             return
-        
         new_link_data = {'name': name, 'path': path}
 
         # --- ★★★ データ同期ロジック ★★★ ---
         # 1. 表示されているグループ名を取得
         current_group_name = self.groups[self.selected_group]['group']
-        
         # 2. original_groups から該当グループを探し、そこに新しいリンクを追加
         for g in self.original_groups:
             if g['group'] == current_group_name:
