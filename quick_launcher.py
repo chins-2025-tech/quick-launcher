@@ -1,3 +1,11 @@
+"""
+quick_launcher.py - A simple and customizable quick launcher application for Windows.
+
+author: chin shinrei
+version: 1.0.0
+date: 2025-6-30
+"""
+
 import os
 import sys
 import json
