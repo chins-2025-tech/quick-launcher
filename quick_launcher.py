@@ -201,6 +201,21 @@ def round_to_step(value, step=4):
     """数値を指定されたステップに丸める（例: 15をstep=4で16に）"""
     return step * round(value / step)
 
+def get_icon_key(path, size):
+    """指定されたパスとサイズから、アイコンキャッシュ用の統一されたキーを生成する"""
+    if not path:
+        return None
+        
+    if path.startswith(('http://', 'https://')):
+        domain = urlparse(path).netloc
+        return (domain, size)
+    else:
+        executable_path = extract_executable_path(path)
+        flags = 0x100 | (0x1 if size <= 20 else 0x0)
+        return (executable_path, size, flags)
+    
+
+
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -1402,19 +1417,8 @@ class LinksEditDialog(tk.Toplevel):
             
             # --- アイコンの非同期読み込み ---
             path = link.get('path', '')
-            icon = None
-            icon_key = None
-            if path:
-                if path.startswith('http'):
-                    key_part = urlparse(path).netloc
-                    icon_key = (key_part, self.link_icon_size)
-                else:
-                    key_part = extract_executable_path(path)
-                    flags = 0x100 | (0x1 if self.link_icon_size <= 20 else 0)
-                    icon_key = (key_part, self.link_icon_size, flags)
-            
-                with _icon_cache_lock:
-                    icon = _icon_cache.get(icon_key) if icon_key else None
+            icon_key = get_icon_key(path, self.link_icon_size)
+            icon = _icon_cache.get(icon_key) if icon_key else None
             
             if not icon:
                 size = self.link_icon_size
@@ -1429,13 +1433,10 @@ class LinksEditDialog(tk.Toplevel):
             
             if not icon and path: # キャッシュになければリクエスト
                 _icon_request_queue.put((path, self.link_icon_size))
-                update_key = (path, self.link_icon_size)
+                update_key = (path, self.link_icon_size) # UI更新キーは元のフルパスのまま
                 with _icon_update_lock:
                     if update_key not in _icon_update_registry:
                         _icon_update_registry[update_key] = []
-                    
-                    # ★★★ 更新対象を (self, img_id) に変更 ★★★
-                    # self は LinksEditDialog のインスタンス
                     _icon_update_registry[update_key].append((self, img_id))
 
             # --- テキストと選択ハイライトの描画 ---
@@ -1829,7 +1830,6 @@ class LinkPopup(tk.Toplevel):
             if widget and widget.winfo_exists():
                 widget.destroy()
         self._popup_cache.clear()
-        print("Sub-popup cache cleared.") # デバッグ用
 
     def reload_links(self):
         self.link_items.clear()
@@ -1980,6 +1980,8 @@ class LinkPopup(tk.Toplevel):
             self.draw_list()
         self._leave_after_id = None
 
+# LinkPopup クラスの create_link_popup_content メソッドをまるごと置き換え
+
     def create_link_popup_content(self, links):
         """【最終修正版】サブポップアップのウィジェットを作成して返す"""
         popup = tk.Toplevel(self)
@@ -2007,50 +2009,35 @@ class LinkPopup(tk.Toplevel):
 
             # --- ▼▼▼ アイコン処理（クリーンアップ版）▼▼▼ ---
             size = self.icon_size
-            icon = None
-            key = None
-
-            # 1. キャッシュキーを生成
-            if path.startswith(('http://', 'https://')):
-                domain = urlparse(path).netloc
-                key = (domain, size)
-            else:
-                executable_path = extract_executable_path(path)
-                flags = 0x100 | (0x1 if size <= 20 else 0x0)
-                key = (executable_path, size, flags)
+            key = get_icon_key(path, size) # ★キー生成をヘルパー関数に統一
             
-            # 2. キャッシュからアイコンを読み込む（ロックで保護）
             with _icon_cache_lock:
-                icon = _icon_cache.get(key)
+                icon = _icon_cache.get(key) if key else None
             
-            # 3. icon_label を一度だけ作成
+            # ラベルを一度だけ作成
             icon_label = tk.Label(row, bg=self.settings['bg'])
             icon_label.grid(row=0, column=0, sticky="nsew", padx=(0, self.TEXT_LEFT_PADDING))
 
-            # 4. アイコンの状態に応じて表示と処理を分岐
+            # アイコンの状態に応じて表示と処理を分岐
             if icon:
                 # キャッシュにあった場合：すぐに表示
                 icon_label.config(image=icon)
-                # ★参照を保持
-                icon_label.image = icon 
+                icon_label.image = icon # 参照保持
                 popup.icon_refs.append(icon)
             else:
                 # キャッシュになかった場合：ダミーを表示し、取得リクエスト
                 dummy_icon = _create_fallback_icon(size)
                 icon_label.config(image=dummy_icon)
-                # ★参照を保持
-                icon_label.image = dummy_icon
+                icon_label.image = dummy_icon # 参照保持
                 popup.icon_refs.append(dummy_icon)
-
-                # このアイコン取得リクエストをキューに入れる
-                _icon_request_queue.put((path, size))
                 
-                # このラベルを「更新待ち」として登録
-                update_key = (path, size)
-                with _icon_update_lock:
-                    if update_key not in _icon_update_registry:
-                        _icon_update_registry[update_key] = []
-                    _icon_update_registry[update_key].append(icon_label)
+                if path: # パスがあればリクエスト
+                    _icon_request_queue.put((path, size))
+                    update_key = (path, size)
+                    with _icon_update_lock:
+                        if update_key not in _icon_update_registry:
+                            _icon_update_registry[update_key] = []
+                        _icon_update_registry[update_key].append(icon_label)
             
             # --- ▲▲▲ アイコン処理ここまで ▲▲▲ ---
 
