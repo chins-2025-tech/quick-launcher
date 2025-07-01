@@ -201,21 +201,6 @@ def round_to_step(value, step=4):
     """数値を指定されたステップに丸める（例: 15をstep=4で16に）"""
     return step * round(value / step)
 
-def get_icon_key(path, size):
-    """指定されたパスとサイズから、アイコンキャッシュ用の統一されたキーを生成する"""
-    if not path:
-        return None
-        
-    if path.startswith(('http://', 'https://')):
-        domain = urlparse(path).netloc
-        return (domain, size)
-    else:
-        executable_path = extract_executable_path(path)
-        flags = 0x100 | (0x1 if size <= 20 else 0x0)
-        return (executable_path, size, flags)
-    
-
-
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -758,16 +743,12 @@ class LinksEditDialog(tk.Toplevel):
         self.selected_group = 0
         self.selected_link = None
         self.icon_refs = []
-        self._fallback_icons = {}
         self.result = None
         self.modified = False  # 変更フラグ
         self.is_searching = False
 
         self.drag_data = {"type": None, "start_index": -1, "widget": None}
         self.drag_indicator_id = None # ガイドラインのID
-
-        self._visible_item_ids = {} # {link_index: canvas_item_id_dict}
-        self._scroll_timer = None   # スクロールイベントを間引くためのタイマー
 
         # ウィンドウクローズ時のハンドラ
         self.protocol("WM_DELETE_WINDOW", self.cancel)
@@ -910,11 +891,7 @@ class LinksEditDialog(tk.Toplevel):
         self.link_canvas.grid(row=0, column=0, sticky="nsew")
         link_scrollbar.config(command=self.link_canvas.yview)
         link_scrollbar.grid(row=0, column=1, sticky="ns")
-        #self.link_canvas.bind("<Configure>", lambda e: self.refresh_link_list())
-        self.link_canvas.bind("<Configure>", self._on_canvas_resize)
-        # スクロールバーの移動も検知する
-        link_scrollbar.config(command=self._on_scroll)
-        self.link_canvas.configure(yscrollcommand=link_scrollbar.set)
+        self.link_canvas.bind("<Configure>", lambda e: self.refresh_link_list())
         self.link_canvas.bind("<MouseWheel>", self._on_link_canvas_mousewheel)
         self.link_canvas.bind("<Double-Button-1>", self.on_link_canvas_double)
         self.link_canvas.bind("<ButtonPress-1>", self._on_press)
@@ -1262,8 +1239,74 @@ class LinksEditDialog(tk.Toplevel):
         self.modified = True
 
     def refresh_link_list(self):
-        """リストの内容が変更されたときに全体を再描画する"""
-        self._redraw_visible_links(full_refresh=True)
+        self.link_canvas.delete("all")
+        self.icon_refs.clear()
+        # self.canvas_item_map.clear()
+
+        font_name_tuple = (self.settings['font'], self.settings['size'])
+        font_path_tuple = (self.settings['font'], self.settings['size'])
+        color_path = "#888888"
+
+        name_font_obj = tkfont.Font(font=font_name_tuple)
+        font_metrics = name_font_obj.metrics()
+        font_height = font_metrics.get('linespace', font_metrics.get('height', 16))
+        padding = 8
+        self.link_row_height = font_height + padding
+
+        self.link_icon_size = font_metrics.get('ascent', 16)
+        self.link_icon_size = round_to_step(self.link_icon_size, step=4)
+        self.link_icon_size = max(12, min(self.link_icon_size, 32))
+
+        if not self.groups or self.selected_group is None or self.selected_group >= len(self.groups):
+            self.link_addr_entry.config(state="disabled")
+            self.save_addr_btn.config(state="disabled")
+            self.link_addr_var.set("")
+            return
+        links = self.groups[self.selected_group]['links']
+        y = 2
+        canvas_width = self.link_canvas.winfo_width() or 360
+        for i, link in enumerate(links):
+            path = link['path']
+            icon = None
+            if path.startswith('http'):
+                domain = urlparse(path).netloc
+                key = (domain, self.link_icon_size)
+                icon = _icon_cache.get(key)
+            else:
+                executable_path = extract_executable_path(path)
+                if self.link_icon_size > 20:
+                    flags = 0x100 | 0x0
+                else:
+                    flags = 0x100 | 0x1
+                key = (executable_path, self.link_icon_size, flags)
+                icon = _icon_cache.get(key)
+            if not icon:
+                icon = _create_fallback_icon(self.link_icon_size)
+            if icon:
+                self.link_canvas.create_image(4, y + self.link_row_height // 2, image=icon, anchor="w")
+                self.icon_refs.append(icon)
+            # アイコンの右側余白を1px、左側を4pxに
+            name_x_start = 4 + self.link_icon_size + 1
+            # 省略せずフルテキストで表示
+            display_name = link['name']
+            if self.selected_link == i:
+                self.link_canvas.create_rectangle(0, y, canvas_width, y+self.link_row_height, outline="#3399ff", width=2)
+            name_id = self.link_canvas.create_text(name_x_start, y + self.link_row_height // 2,
+                                                   text=display_name, anchor="w", font=font_name_tuple)
+            name_width = name_font_obj.measure(display_name)
+            path_x_start = name_x_start + name_width + 25
+            path_id = self.link_canvas.create_text(path_x_start, y + self.link_row_height // 2,
+                                                   text=link['path'], anchor="w", font=font_path_tuple, fill=color_path)
+            y += self.link_row_height
+        self.link_canvas.config(scrollregion=(0,0,canvas_width,y))
+        if self.selected_link is not None and 0 <= self.selected_link < len(links):
+            self.link_addr_entry.config(state="normal")
+            self.save_addr_btn.config(state="normal")
+            self.link_addr_var.set(links[self.selected_link]['path'])
+        else:
+            self.link_addr_entry.config(state="disabled")
+            self.save_addr_btn.config(state="disabled")
+            self.link_addr_var.set("")
 
     def refresh_group_list(self):
         self.group_listbox.delete(0, tk.END)
@@ -1342,136 +1385,19 @@ class LinksEditDialog(tk.Toplevel):
     def on_link_addr_focus(self, event):
         self.link_addr_entry.icursor(tk.END)
 
-    def _on_canvas_resize(self, event=None):
-        """キャンバスのサイズが変わった時に再描画"""
-        self._redraw_visible_links()
-
-    def _on_scroll(self, *args):
-        """スクロールバーが動いた時の処理 (yviewと連動)"""
-        # スクロールイベントが大量発生するのを防ぐ
-        if self._scroll_timer:
-            self.after_cancel(self._scroll_timer)
-        # 50ms後に再描画を実行
-        self._scroll_timer = self.after(50, self._redraw_visible_links)
-        
-        # スクロールバーのコマンドを直接実行
-        self.link_canvas.yview(*args)
-
     def _on_link_canvas_mousewheel(self, event):
-        # マウスホイールイベントも_on_scrollに繋げる
-        if event.num == 4 or event.delta > 0:
-            self.link_canvas.yview_scroll(-1, "units")
-        else:
-            self.link_canvas.yview_scroll(1, "units")
-        self._on_scroll() # スクロールイベントを発火
-        return "break" # デフォルトのスクロール動作を抑制
-
-    def _redraw_visible_links(self, full_refresh=False):
-        """Canvasに見えている範囲のリンクだけを描画する"""
-        if full_refresh:
-            self.link_canvas.delete("all")
-            self._visible_item_ids.clear()
-            self.icon_refs.clear()
-        
-        if not self.groups or self.selected_group is None or not self.groups[self.selected_group]['links']:
-            self.link_canvas.delete("all")
-            self.link_canvas.config(scrollregion=(0,0,1,1))
+        scroll_info = self.link_canvas.yview()
+        if scroll_info[0] == 0.0 and scroll_info[1] == 1.0:
             return
+    
+        if event.num == 4:
+            delta = -1
+        elif event.num == 5:
+            delta = 1
+        else:
+            delta = -1 * (event.delta // 120)
             
-        links = self.groups[self.selected_group]['links']
-
-        # --- 1. Canvas全体のサイズ（スクロール領域）を設定 ---
-        canvas_width = self.link_canvas.winfo_width()
-        total_height = len(links) * self.link_row_height + 4
-        self.link_canvas.config(scrollregion=(0, 0, canvas_width, total_height))
-        
-        # --- 2. 現在の表示範囲を計算 ---
-        top_y = self.link_canvas.canvasy(0)
-        bottom_y = self.link_canvas.canvasy(self.link_canvas.winfo_height())
-        
-        # 画面の上下に少し余裕を持たせて描画範囲を決定（チラつき防止）
-        start_index = max(0, int(top_y / self.link_row_height) - 2)
-        end_index = min(len(links), int(bottom_y / self.link_row_height) + 2)
-        
-        # --- 3. 画面外に出たアイテムを削除する（重要！） ---
-        visible_indices = set(range(start_index, end_index))
-        items_to_delete = []
-        for index, item_ids in self._visible_item_ids.items():
-            if index not in visible_indices:
-                for item_id in item_ids.values():
-                    if item_id:
-                        self.link_canvas.delete(item_id)
-                items_to_delete.append(index)
-        
-        for index in items_to_delete:
-            del self._visible_item_ids[index]
-        
-        # --- 描画処理 ---
-        # (このループは見える範囲の十数回しか回らない)
-        for i in range(start_index, end_index):
-            if i in self._visible_item_ids and not full_refresh:
-                continue
-
-            link = links[i]
-            y_pos = i * self.link_row_height + 2
-            
-            # --- アイコンの非同期読み込み ---
-            path = link.get('path', '')
-            icon_key = get_icon_key(path, self.link_icon_size)
-            icon = _icon_cache.get(icon_key) if icon_key else None
-            
-            if not icon:
-                size = self.link_icon_size
-                if size not in self._fallback_icons:
-                    self._fallback_icons[size] = _create_fallback_icon(size)
-                icon_to_draw = self.fallback_icons[size]
-            else:
-                icon_to_draw = icon
-            self.icon_refs.append(icon_to_draw)
-            
-            img_id = self.link_canvas.create_image(4, y_pos + self.link_row_height // 2, image=icon_to_draw, anchor="w")
-            
-            if not icon and path: # キャッシュになければリクエスト
-                _icon_request_queue.put((path, self.link_icon_size))
-                update_key = (path, self.link_icon_size) # UI更新キーは元のフルパスのまま
-                with _icon_update_lock:
-                    if update_key not in _icon_update_registry:
-                        _icon_update_registry[update_key] = []
-                    _icon_update_registry[update_key].append((self, img_id))
-
-            # --- テキストと選択ハイライトの描画 ---
-            rect_id = None
-            if self.selected_link == i:
-                rect_id = self.link_canvas.create_rectangle(
-                    0, y_pos - 2, canvas_width, y_pos + self.link_row_height - 2, 
-                    outline="#3399ff", width=2
-                )
-            
-            font_name_tuple = (self.settings['font'], self.settings['size'])
-            name_x_start = 4 + self.link_icon_size + 5
-            
-            name_id = self.link_canvas.create_text(
-                name_x_start, y_pos + self.link_row_height // 2,
-                text=link.get('name', ''), anchor="w", font=font_name_tuple
-            )
-
-            name_font_obj = tkfont.Font(font=font_name_tuple)
-            name_width = name_font_obj.measure(link.get('name', ''))
-            path_x_start = name_x_start + name_width + 25 
-            
-            path_id = self.link_canvas.create_text(
-                path_x_start, y_pos + self.link_row_height // 2,
-                text=link.get('path', ''), anchor="w", 
-                font=(self.settings['font'], self.settings['size']), fill="#888888"
-            )
-            
-            # --- 描画したアイテムIDを記録（修正済み） ---
-            self._visible_item_ids[i] = {
-                "image": img_id, 
-                "text": name_id, 
-                "path": path_id,
-                "rect": rect_id
-            }
+        self.link_canvas.yview_scroll(delta, "units")
 
     def _on_search_change(self, *args):
         query = self.search_var.get().strip()
@@ -1830,6 +1756,7 @@ class LinkPopup(tk.Toplevel):
             if widget and widget.winfo_exists():
                 widget.destroy()
         self._popup_cache.clear()
+        print("Sub-popup cache cleared.") # デバッグ用
 
     def reload_links(self):
         self.link_items.clear()
@@ -1980,10 +1907,8 @@ class LinkPopup(tk.Toplevel):
             self.draw_list()
         self._leave_after_id = None
 
-# LinkPopup クラスの create_link_popup_content メソッドをまるごと置き換え
-
     def create_link_popup_content(self, links):
-        """【最終修正版】サブポップアップのウィジェットを作成して返す"""
+        """ サブポップアップのウィジェットを作成して返す"""
         popup = tk.Toplevel(self)
         popup.overrideredirect(True)
         popup.attributes("-topmost", True)
@@ -1997,6 +1922,7 @@ class LinkPopup(tk.Toplevel):
         font_link_obj = tkfont.Font(font=font_link)
         max_link_width = 320
 
+        # ★ PhotoImageオブジェクトへの参照を保持するためのリスト
         popup.icon_refs = []
 
         for i, link in enumerate(links):
@@ -2009,35 +1935,46 @@ class LinkPopup(tk.Toplevel):
 
             # --- ▼▼▼ アイコン処理（クリーンアップ版）▼▼▼ ---
             size = self.icon_size
-            key = get_icon_key(path, size) # ★キー生成をヘルパー関数に統一
+            icon = None
+            key = None
+
+            # 1. キャッシュキーを生成
+            if path.startswith(('http://', 'https://')):
+                domain = urlparse(path).netloc
+                key = (domain, size)
+            else:
+                executable_path = extract_executable_path(path)
+                flags = 0x100 | (0x1 if size <= 20 else 0x0)
+                key = (executable_path, size, flags)
             
+            # 2. キャッシュからアイコンを読み込む（ロックで保護）
             with _icon_cache_lock:
-                icon = _icon_cache.get(key) if key else None
+                icon = _icon_cache.get(key)
             
-            # ラベルを一度だけ作成
+            # 3. icon_label を一度だけ作成
             icon_label = tk.Label(row, bg=self.settings['bg'])
             icon_label.grid(row=0, column=0, sticky="nsew", padx=(0, self.TEXT_LEFT_PADDING))
 
-            # アイコンの状態に応じて表示と処理を分岐
+            # 4. アイコンの状態に応じて表示と処理を分岐
             if icon:
                 # キャッシュにあった場合：すぐに表示
                 icon_label.config(image=icon)
-                icon_label.image = icon # 参照保持
                 popup.icon_refs.append(icon)
             else:
                 # キャッシュになかった場合：ダミーを表示し、取得リクエスト
                 dummy_icon = _create_fallback_icon(size)
                 icon_label.config(image=dummy_icon)
-                icon_label.image = dummy_icon # 参照保持
                 popup.icon_refs.append(dummy_icon)
+
+                # このアイコン取得リクエストをキューに入れる
+                _icon_request_queue.put((path, size))
                 
-                if path: # パスがあればリクエスト
-                    _icon_request_queue.put((path, size))
-                    update_key = (path, size)
-                    with _icon_update_lock:
-                        if update_key not in _icon_update_registry:
-                            _icon_update_registry[update_key] = []
-                        _icon_update_registry[update_key].append(icon_label)
+                # このラベルを「更新待ち」として登録
+                update_key = (path, size)
+                with _icon_update_lock:
+                    if update_key not in _icon_update_registry:
+                        _icon_update_registry[update_key] = []
+                    _icon_update_registry[update_key].append(icon_label)
             
             # --- ▲▲▲ アイコン処理ここまで ▲▲▲ ---
 
@@ -2559,43 +2496,22 @@ def main():
     popup = LinkPopup(root, settings, current_profile_name)
     
     def check_icon_results():
-        """バックグラウンドで取得されたアイコンをUIに反映するループ"""
         try:
             while not _icon_result_queue.empty():
                 path, size, icon = _icon_result_queue.get_nowait()
                 
-                update_key = (path, size)
+                # このアイコンを待っているウィジェットリストを取得して更新
+                key = (path, size)
                 with _icon_update_lock:
-                    if update_key in _icon_update_registry:
-                        widgets_to_update = _icon_update_registry[update_key]
-                        
-                        for widget_info in widgets_to_update:
-                            # --- ▼▼▼ ここからが修正の核心 ▼▼▼ ---
-
-                            # widget_info の型で、どのダイアログからのリクエストか判断
-                            if isinstance(widget_info, tuple): 
-                                # LinksEditDialogからのリクエスト: (dialog_instance, item_id)
-                                dialog_instance, item_id = widget_info
-                                
-                                # ダイアログとCanvasがまだ存在するか確認
-                                if dialog_instance and dialog_instance.winfo_exists():
-                                    # Canvasの画像アイテムを更新
-                                    dialog_instance.link_canvas.itemconfig(item_id, image=icon)
-                                    
-                                    # ★重要：ダイアログの参照リストに画像を追加してGCを防ぐ
-                                    dialog_instance.icon_refs.append(icon)
-                                    
-                            else: 
-                                # LinkPopupからのリクエスト: tk.Labelウィジェット
-                                widget = widget_info
-                                if widget.winfo_exists():
-                                    widget.config(image=icon)
-                                    # ★重要：ウィジェット自身に参照を持たせてGCを防ぐ
-                                    widget.image = icon 
-                                    
-                        # 更新が終わったので、このキーの待機リストは削除
-                        del _icon_update_registry[update_key]
-                        
+                    if key in _icon_update_registry:
+                        widgets_to_update = _icon_update_registry[key]
+                        for widget in widgets_to_update:
+                            if widget.winfo_exists():
+                                widget.config(image=icon)
+                                # PhotoImageがガベージコレクションされないように参照を保持
+                                widget.image = icon 
+                        # 更新が終わったらリストをクリア
+                        del _icon_update_registry[key]
         finally:
             # 100ms後に再度この関数を呼び出す
             root.after(100, check_icon_results)
@@ -2607,7 +2523,6 @@ def main():
     try:
         root.mainloop()
     finally:
-        _icon_request_queue.put((None, None))
         # --- すべてのFileHandlerを明示的にclose & remove ---
         logger = logging.getLogger()
         handlers = logger.handlers[:]
