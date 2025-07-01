@@ -1433,8 +1433,10 @@ class LinksEditDialog(tk.Toplevel):
                 with _icon_update_lock:
                     if update_key not in _icon_update_registry:
                         _icon_update_registry[update_key] = []
-                    # ★更新対象はCanvasの画像アイテムIDとCanvasウィジェット自体
-                    _icon_update_registry[update_key].append((self.link_canvas, img_id))
+                    
+                    # ★★★ 更新対象を (self, img_id) に変更 ★★★
+                    # self は LinksEditDialog のインスタンス
+                    _icon_update_registry[update_key].append((self, img_id))
 
             # --- テキストと選択ハイライトの描画 ---
             rect_id = None
@@ -1979,7 +1981,7 @@ class LinkPopup(tk.Toplevel):
         self._leave_after_id = None
 
     def create_link_popup_content(self, links):
-        """ サブポップアップのウィジェットを作成して返す"""
+        """【最終修正版】サブポップアップのウィジェットを作成して返す"""
         popup = tk.Toplevel(self)
         popup.overrideredirect(True)
         popup.attributes("-topmost", True)
@@ -1993,7 +1995,6 @@ class LinkPopup(tk.Toplevel):
         font_link_obj = tkfont.Font(font=font_link)
         max_link_width = 320
 
-        # ★ PhotoImageオブジェクトへの参照を保持するためのリスト
         popup.icon_refs = []
 
         for i, link in enumerate(links):
@@ -2030,11 +2031,15 @@ class LinkPopup(tk.Toplevel):
             if icon:
                 # キャッシュにあった場合：すぐに表示
                 icon_label.config(image=icon)
+                # ★参照を保持
+                icon_label.image = icon 
                 popup.icon_refs.append(icon)
             else:
                 # キャッシュになかった場合：ダミーを表示し、取得リクエスト
                 dummy_icon = _create_fallback_icon(size)
                 icon_label.config(image=dummy_icon)
+                # ★参照を保持
+                icon_label.image = dummy_icon
                 popup.icon_refs.append(dummy_icon)
 
                 # このアイコン取得リクエストをキューに入れる
@@ -2567,6 +2572,7 @@ def main():
     popup = LinkPopup(root, settings, current_profile_name)
     
     def check_icon_results():
+        """バックグラウンドで取得されたアイコンをUIに反映するループ"""
         try:
             while not _icon_result_queue.empty():
                 path, size, icon = _icon_result_queue.get_nowait()
@@ -2575,19 +2581,36 @@ def main():
                 with _icon_update_lock:
                     if update_key in _icon_update_registry:
                         widgets_to_update = _icon_update_registry[update_key]
+                        
                         for widget_info in widgets_to_update:
-                            # ★★★ widget_info の形式を判定 ★★★
-                            if isinstance(widget_info, tuple): # LinksEditDialogからのリクエスト
-                                canvas, item_id = widget_info
-                                if canvas.winfo_exists():
-                                    canvas.itemconfig(item_id, image=icon)
-                            else: # LinkPopupからのリクエスト
+                            # --- ▼▼▼ ここからが修正の核心 ▼▼▼ ---
+
+                            # widget_info の型で、どのダイアログからのリクエストか判断
+                            if isinstance(widget_info, tuple): 
+                                # LinksEditDialogからのリクエスト: (dialog_instance, item_id)
+                                dialog_instance, item_id = widget_info
+                                
+                                # ダイアログとCanvasがまだ存在するか確認
+                                if dialog_instance and dialog_instance.winfo_exists():
+                                    # Canvasの画像アイテムを更新
+                                    dialog_instance.link_canvas.itemconfig(item_id, image=icon)
+                                    
+                                    # ★重要：ダイアログの参照リストに画像を追加してGCを防ぐ
+                                    dialog_instance.icon_refs.append(icon)
+                                    
+                            else: 
+                                # LinkPopupからのリクエスト: tk.Labelウィジェット
                                 widget = widget_info
                                 if widget.winfo_exists():
                                     widget.config(image=icon)
+                                    # ★重要：ウィジェット自身に参照を持たせてGCを防ぐ
                                     widget.image = icon 
+                                    
+                        # 更新が終わったので、このキーの待機リストは削除
                         del _icon_update_registry[update_key]
+                        
         finally:
+            # 100ms後に再度この関数を呼び出す
             root.after(100, check_icon_results)
 
     # mainloopの前に開始
@@ -2597,6 +2620,7 @@ def main():
     try:
         root.mainloop()
     finally:
+        _icon_request_queue.put((None, None))
         # --- すべてのFileHandlerを明示的にclose & remove ---
         logger = logging.getLogger()
         handlers = logger.handlers[:]
