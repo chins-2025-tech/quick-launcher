@@ -31,6 +31,39 @@ import shutil
 import subprocess
 import copy
 import re
+import queue
+_icon_request_queue = queue.Queue()
+_icon_result_queue = queue.Queue()
+
+# ★★★ UI更新のための管理辞書を追加 ★★★
+# { (path, size): [widget1, widget2, ...], ... }
+_icon_update_registry = {}
+_icon_update_lock = threading.Lock() # この辞書を保護するロック
+
+def icon_worker():
+    """アイコン取得専用のワーカースレッド"""
+    while True:
+        try:
+            path, size = _icon_request_queue.get(timeout=1)
+            if path is None: break
+
+            # get_..._icon 関数がキャッシュの読み書きを管理してくれる
+            if path.startswith(('http://', 'https://')):
+                icon = get_web_icon(path, size=size)
+            else:
+                icon = get_file_icon(path, size=size)
+            
+            if icon:
+                # 結果をUIスレッドに通知
+                _icon_result_queue.put((path, size, icon))
+
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logging.warning(f"Icon worker failed for '{path}': {e}")
+        finally:
+             if 'path' in locals() and path is not None:
+                _icon_request_queue.task_done()
 
 # --- アプリケーション設定 ---
 logging.basicConfig(filename='app_errors.log', level=logging.ERROR,
@@ -114,6 +147,7 @@ gdi32.DeleteObject.restype = wintypes.BOOL
 _icon_cache = {}
 _system_icon_cache = {}
 _default_browser_icon = {}  # サイズごとにキャッシュ
+_icon_cache_lock = threading.Lock()
 
 # --- ヘルパー関数 ---
 
@@ -408,9 +442,13 @@ def get_file_icon(path, size=16):
     else:
         flags = 0x100 | 0x1
     key = (executable_path, size, flags)
+
     # まず、キャッシュを確認
-    if key in _icon_cache:
-        return _icon_cache[key]
+    with _icon_cache_lock:
+        if key in _icon_cache:
+            return _icon_cache.get(key)
+        
+    tk_icon = None
 
     # ファイル/フォルダの存在を確認
     file_exists = os.path.exists(executable_path)
@@ -422,8 +460,6 @@ def get_file_icon(path, size=16):
 
     info = SHFILEINFO()
     res = shell32.SHGetFileInfoW(executable_path, 0, ctypes.byref(info), ctypes.sizeof(info), flags)
-
-    tk_icon = None
     if res and info.hIcon:
         tk_icon = _hicon_to_photoimage(info.hIcon, size)
     else:
@@ -459,8 +495,12 @@ def get_file_icon(path, size=16):
     if tk_icon is None:
         tk_icon = get_system_folder_icon(size)
 
-    _icon_cache[key] = tk_icon
-
+    # --- 取得結果をキャッシュに書き込む ---
+    with _icon_cache_lock:
+        # 他のスレッドが先に書き込んでいないか再チェック
+        if key not in _icon_cache:
+            _icon_cache[key] = tk_icon
+            
     return tk_icon
 
 def get_web_icon(url, size=16):
@@ -478,7 +518,9 @@ def get_web_icon(url, size=16):
 
     domain = urlparse(url).netloc
     key = (domain, size)
-    if key in _icon_cache: return _icon_cache[key]
+    with _icon_cache_lock:
+        if key in _icon_cache:
+            return _icon_cache.get(key)
 
     tk_icon = None
     
@@ -533,7 +575,12 @@ def get_web_icon(url, size=16):
             _default_browser_icon[size] = _get_or_create_default_browser_icon(size)
         tk_icon = _default_browser_icon[size]
 
-    _icon_cache[key] = tk_icon
+    # --- 取得結果をキャッシュに書き込む ---
+    with _icon_cache_lock:
+        # 他のスレッドが先に書き込んでいないか再チェック
+        if key not in _icon_cache:
+            _icon_cache[key] = tk_icon
+            
     return tk_icon
 
 def _get_or_create_default_browser_icon(size=16):
@@ -1649,6 +1696,7 @@ class LinkPopup(tk.Toplevel):
         self.settings = settings.copy()
         self.group_row_height = 24 # デフォルト値
         self.icon_size = 16 # デフォルト値
+
         self.overrideredirect(True)
         self.withdraw()
         self.bind("<FocusOut>", lambda e: self.withdraw())
@@ -1666,9 +1714,10 @@ class LinkPopup(tk.Toplevel):
         self.folder_icon = None
         self.arrow_icon = None
 
-        self.reload_links()
-        self.apply_settings(self.settings)
-        LinkPopup.current_icon_size = self.icon_size
+        self._popup_cache = {}  # {group_name: Toplevel_widget}
+
+        #self.apply_settings(self.settings)
+        self.reload_profile(profile_name)
 
     def apply_settings(self, settings):
         self.settings = settings.copy()
@@ -1689,14 +1738,25 @@ class LinkPopup(tk.Toplevel):
         self.ICON_COLUMN_WIDTH = self.icon_size + 5  # 左4px+アイコン+右1px
         # フォルダアイコンを必ず取得
         self.folder_icon = get_system_folder_icon(size=self.icon_size)
+        self.clear_cache()  # 設定変更時はキャッシュをクリア
         self.draw_list()
+        LinkPopup.current_icon_size = self.icon_size
 
     def reload_profile(self, profile_name):
         self.profile_name = profile_name
         # settingsは共有なので再読み込みは不要。ただし、必要ならここで読み込んでも良い。
         # self.settings = load_settings() 
+        self.clear_cache()  # キャッシュをクリア
         self.reload_links() # 新しいプロファイルのlinks.jsonを読み込む
         self.apply_settings(self.settings) # 見た目を更新
+
+    def clear_cache(self):
+        """保持しているサブポップアップのキャッシュをすべて破棄する"""
+        for widget in self._popup_cache.values():
+            if widget and widget.winfo_exists():
+                widget.destroy()
+        self._popup_cache.clear()
+        print("Sub-popup cache cleared.") # デバッグ用
 
     def reload_links(self):
         self.link_items.clear()
@@ -1846,88 +1906,178 @@ class LinkPopup(tk.Toplevel):
             if self.link_popup: self.link_popup.destroy(); self.link_popup = None
             self.draw_list()
         self._leave_after_id = None
-        
-    def show_link_popup(self, group_idx):
-        if self.link_popup: self.link_popup.destroy(); self.link_popup = None
-        if group_idx is None or not (0 <= group_idx < len(self.group_map)): return
-        links = self.link_items.get(self.group_map[group_idx], [])
-        if not links: return
 
+    def create_link_popup_content(self, links):
+        """ サブポップアップのウィジェットを作成して返す"""
         popup = tk.Toplevel(self)
-        popup.overrideredirect(True); popup.attributes("-topmost", True)
-
-        border_color = self.settings.get('border_color', DEFAULT_SETTINGS['border_color'])
-        content_bg_color = self.settings.get('bg', DEFAULT_SETTINGS['bg'])
-
-        popup.config(bg=border_color)
-        frame = tk.Frame(popup, bg=content_bg_color)
+        popup.overrideredirect(True)
+        popup.attributes("-topmost", True)
+        popup.config(bg=self.settings.get('border_color', DEFAULT_SETTINGS['border_color']))
+        
+        frame = tk.Frame(popup, bg=self.settings.get('bg', DEFAULT_SETTINGS['bg']))
         frame.pack(expand=True, fill="both", padx=1, pady=1)
 
         font_link = (self.settings['font'], self.settings['size'])
         font_underline = tkfont.Font(font=font_link); font_underline.config(underline=True)
         font_link_obj = tkfont.Font(font=font_link)
-        max_link_width = 320  # リンク名の最大幅(px)
+        max_link_width = 320
+
+        # ★ PhotoImageオブジェクトへの参照を保持するためのリスト
         popup.icon_refs = []
 
         for i, link in enumerate(links):
             row = tk.Frame(frame, bg=self.settings['bg'])
             row.grid(row=i, column=0, sticky="ew")
             frame.grid_columnconfigure(0, weight=1)
-            row.grid_columnconfigure(0, minsize=self.ICON_COLUMN_WIDTH)
-            row.grid_columnconfigure(1, weight=1)
-            path = link['path']
-            if path.startswith('http'):
+            
+            path = link.get('path', '')
+            if not path: continue
+
+            # --- ▼▼▼ アイコン処理（クリーンアップ版）▼▼▼ ---
+            size = self.icon_size
+            icon = None
+            key = None
+
+            # 1. キャッシュキーを生成
+            if path.startswith(('http://', 'https://')):
                 domain = urlparse(path).netloc
-                key = (domain, self.icon_size)
-                icon = _icon_cache.get(key)
-                if not icon:
-                    icon = _create_fallback_icon(self.icon_size)
+                key = (domain, size)
             else:
                 executable_path = extract_executable_path(path)
-                if self.icon_size > 20:
-                    flags = 0x100 | 0x0
-                else:
-                    flags = 0x100 | 0x1
-                key = (executable_path, self.icon_size, flags)
+                flags = 0x100 | (0x1 if size <= 20 else 0x0)
+                key = (executable_path, size, flags)
+            
+            # 2. キャッシュからアイコンを読み込む（ロックで保護）
+            with _icon_cache_lock:
                 icon = _icon_cache.get(key)
-                if not icon:
-                    icon = _create_fallback_icon(self.icon_size)
-            icon_label = tk.Label(row, image=icon, bg=self.settings['bg'])
-            icon_label.grid(row=0, column=0, sticky="nse", padx=(0, self.TEXT_LEFT_PADDING))
-            popup.icon_refs.append(icon)
-            # リンク名を省略表示
-            display_name = ellipsize_text(link['name'], font_link_obj, max_link_width)
+            
+            # 3. icon_label を一度だけ作成
+            icon_label = tk.Label(row, bg=self.settings['bg'])
+            icon_label.grid(row=0, column=0, sticky="nsew", padx=(0, self.TEXT_LEFT_PADDING))
+
+            # 4. アイコンの状態に応じて表示と処理を分岐
+            if icon:
+                # キャッシュにあった場合：すぐに表示
+                icon_label.config(image=icon)
+                popup.icon_refs.append(icon)
+            else:
+                # キャッシュになかった場合：ダミーを表示し、取得リクエスト
+                dummy_icon = _create_fallback_icon(size)
+                icon_label.config(image=dummy_icon)
+                popup.icon_refs.append(dummy_icon)
+
+                # このアイコン取得リクエストをキューに入れる
+                _icon_request_queue.put((path, size))
+                
+                # このラベルを「更新待ち」として登録
+                update_key = (path, size)
+                with _icon_update_lock:
+                    if update_key not in _icon_update_registry:
+                        _icon_update_registry[update_key] = []
+                    _icon_update_registry[update_key].append(icon_label)
+            
+            # --- ▲▲▲ アイコン処理ここまで ▲▲▲ ---
+
+            display_name = ellipsize_text(link.get('name', ''), font_link_obj, max_link_width)
             text_label = tk.Label(row, text=display_name, anchor="w", bg=self.settings['bg'], font=font_link, fg=self.settings['font_color'])
             text_label.grid(row=0, column=1, sticky="w")
+            
+            row.grid_columnconfigure(0, minsize=self.ICON_COLUMN_WIDTH)
+            row.grid_columnconfigure(1, weight=1)
+
             def on_enter(e, lbl=text_label): lbl.config(font=font_underline)
             def on_leave(e, lbl=text_label): lbl.config(font=font_link)
             def on_click(e, p=path): self.open_and_close(p)
+            
             for w in [row, icon_label, text_label]:
-                w.bind("<Enter>", on_enter); w.bind("<Leave>", on_leave); w.bind("<Button-1>", on_click)
+                w.bind("<Enter>", on_enter)
+                w.bind("<Leave>", on_leave)
+                w.bind("<Button-1>", on_click)
+                
+        popup.bind("<Leave>", lambda e: self._on_link_popup_leave())
+        popup.withdraw() 
+        return popup
+
+    def show_link_popup(self, group_idx):
+        # 以前表示されていたポップアップがあれば、非表示にする
+        if self.link_popup and self.link_popup.winfo_exists():
+            self.link_popup.withdraw()
+            self.link_popup = None
+
+        # マウスがグループ上になければ何もしない
+        if group_idx is None or not (0 <= group_idx < len(self.group_map)):
+            return
+
+        group_name = self.group_map[group_idx]
+        links = self.link_items.get(group_name, [])
+        if not links:
+            return
+
+        # --- ▼▼▼ ここからがキャッシュロジック ▼▼▼ ---
+        
+        # 1. キャッシュにサブポップアップが存在するか確認
+        if group_name in self._popup_cache and self._popup_cache[group_name].winfo_exists():
+            # あれば、キャッシュから取得
+            popup = self._popup_cache[group_name]
+            # print(f"Cache HIT for '{group_name}'") # デバッグ用
+        else:
+            # なければ、新しいメソッドを呼び出して新規作成
+            # print(f"Cache MISS for '{group_name}'. Creating new popup.") # デバッグ用
+            popup = self.create_link_popup_content(links)
+            # 作成したウィジェットをキャッシュに保存
+            self._popup_cache[group_name] = popup
+
+        # --- ▲▲▲ キャッシュロジックここまで ▲▲▲ ---
+
+        # 2. 座標を計算して表示する（この部分は変更なし）
         self.update_idletasks()
         popup.update_idletasks()
+        
         screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
         parent_x = self.winfo_rootx()
         parent_y = self.winfo_rooty()
         parent_w = self.winfo_width()
         popup_w = popup.winfo_width()
         popup_h = popup.winfo_height()
+
         x = parent_x + parent_w
-        y = parent_y + group_idx * self.group_row_height 
+        y = parent_y + group_idx * self.group_row_height
+        
         if x + popup_w > screen_w:
             x = parent_x - popup_w
-        if y + popup_h > screen_h:
-            y = screen_h - popup_h - 5
+        if y + popup_h > self.winfo_screenheight():
+            y = self.winfo_screenheight() - popup_h - 5
         if y < 0:
             y = 5
+            
         popup.geometry(f"+{x}+{y}")
+        popup.deiconify() # 非表示状態から表示状態へ
+        
         self.link_popup = popup
-        popup.bind("<Leave>", lambda e: self._on_link_popup_leave())
+
+
+
+    def _delayed_hide(self):
+        if not self._point_in_window(self.winfo_pointerx(), self.winfo_pointery(), self) and \
+           not (self.link_popup and self.link_popup.winfo_exists() and self._point_in_window(self.winfo_pointerx(), self.winfo_pointery(), self.link_popup)):
+            
+            self.hover_group = None
+            if self.link_popup and self.link_popup.winfo_exists():
+                # ★★★ destroy() の代わりに withdraw() を使う ★★★
+                self.link_popup.withdraw()
+                self.link_popup = None
+            
+            self.draw_list()
+        self._leave_after_id = None
 
     def open_and_close(self, path):
         open_link(path)
-        if self.link_popup: self.link_popup.destroy(); self.link_popup = None
+        
+        # 表示されているサブポップアップとメインポップアップの両方を非表示にする
+        if self.link_popup and self.link_popup.winfo_exists():
+            self.link_popup.withdraw()
+            self.link_popup = None
+            
         self.withdraw()
 
     def _point_in_window(self, x, y, win):
@@ -2214,6 +2364,7 @@ def main():
             if dialog.result is not None:
                 save_links_data(dialog.result, current_profile_name)
                 if popup:
+                    popup.clear_cache()
                     popup.reload_profile(current_profile_name)
         finally:
             is_dialog_open = False
@@ -2227,7 +2378,9 @@ def main():
             if dialog.result is not None:
                 settings.clear()
                 settings.update(dialog.result)
-                if popup: popup.apply_settings(settings)
+                if popup: 
+                    popup.clear_cache()
+                    popup.apply_settings(settings)
         finally:
             is_dialog_open = False
 
@@ -2342,6 +2495,30 @@ def main():
     # 3. アイコンを読み込んだ後で、それを利用するウィジェットを作成する
     popup = LinkPopup(root, settings, current_profile_name)
     
+    def check_icon_results():
+        try:
+            while not _icon_result_queue.empty():
+                path, size, icon = _icon_result_queue.get_nowait()
+                
+                # このアイコンを待っているウィジェットリストを取得して更新
+                key = (path, size)
+                with _icon_update_lock:
+                    if key in _icon_update_registry:
+                        widgets_to_update = _icon_update_registry[key]
+                        for widget in widgets_to_update:
+                            if widget.winfo_exists():
+                                widget.config(image=icon)
+                                # PhotoImageがガベージコレクションされないように参照を保持
+                                widget.image = icon 
+                        # 更新が終わったらリストをクリア
+                        del _icon_update_registry[key]
+        finally:
+            # 100ms後に再度この関数を呼び出す
+            root.after(100, check_icon_results)
+
+    # mainloopの前に開始
+    root.after(100, check_icon_results)
+
     # 4. メインループを開始
     try:
         root.mainloop()
