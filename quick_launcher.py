@@ -32,6 +32,7 @@ import subprocess
 import copy
 import re
 import queue
+
 _icon_request_queue = queue.Queue()
 _icon_result_queue = queue.Queue()
 
@@ -598,8 +599,31 @@ def _get_or_create_default_browser_icon(size=16):
     except Exception:
         return get_system_warning_icon(size)
     
-# --- GUIクラス ---
+# 新增函数：从URL获取网页标题
+def get_url_title(url):
+    """
+    从给定的URL获取网页的<title>标签内容。
+    如果获取失败或没有title，则返回None。
+    """
+    domain = ""
+    try:
+        domain = urlparse(url).netloc
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=5, verify=False)
+        response.raise_for_status()  # 检查HTTP请求是否成功
 
+        soup = BeautifulSoup(response.text, 'html.parser')
+        title_tag = soup.find('title')
+        if title_tag:
+            return title_tag.get_text(strip=True)
+        else:
+            return domain
+    except requests.exceptions.RequestException as e:
+        return domain
+    except Exception as e:
+        return domain
+
+# --- GUIクラス ---
 class ToolTip:
     def __init__(self, widget):
         self.widget = widget
@@ -1089,7 +1113,7 @@ class LinksEditDialog(tk.Toplevel):
         if isinstance(clipboard_text, str):
             text = clipboard_text.strip()
             if text.startswith("http://") or text.startswith("https://"):
-                default_name = ""
+                default_name = get_url_title(text)
                 default_path = text
             else:
                 base = os.path.basename(text)
