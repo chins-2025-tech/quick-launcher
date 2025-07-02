@@ -150,6 +150,19 @@ _system_icon_cache = {}
 _default_browser_icon = {}  # サイズごとにキャッシュ
 _icon_cache_lock = threading.Lock()
 
+# --- キャッシュキー生成 ---
+def generate_icon_cache_key(path, size):
+    if path.startswith(('http://', 'https://')):
+        domain = urlparse(path).netloc
+        return (domain, size)
+    else:
+        excutable_path = extract_executable_path(path)
+        if size > 20:
+            flags = 0x100 | 0x0 # 大きいアイコン
+        else:
+            flags = 0x100 | 0x1 # 小さいアイコン
+        return (excutable_path, size, flags)
+
 # --- ヘルパー関数 ---
 
 ICON_BASE64 = """\
@@ -435,14 +448,8 @@ def extract_executable_path(command_line):
 
 def get_file_icon(path, size=16):
     """ファイルパスからアイコンを取得する。パスが存在しない場合は警告アイコンを返す。"""
+    key = generate_icon_cache_key(path, size)
     executable_path = extract_executable_path(path)
-
-    # サイズに応じたフラグを決定する
-    if size > 20:
-        flags = 0x100 | 0x0
-    else:
-        flags = 0x100 | 0x1
-    key = (executable_path, size, flags)
 
     # まず、キャッシュを確認
     with _icon_cache_lock:
@@ -458,6 +465,11 @@ def get_file_icon(path, size=16):
         tk_icon = get_system_warning_icon(size)
         _icon_cache[key] = tk_icon
         return tk_icon
+
+    if size > 20:
+        flags = 0x100 | 0x0 # 大きいアイコン
+    else:
+        flags = 0x100 | 0x1 # 小さいアイコン
 
     info = SHFILEINFO()
     res = shell32.SHGetFileInfoW(executable_path, 0, ctypes.byref(info), ctypes.sizeof(info), flags)
@@ -517,8 +529,8 @@ def get_web_icon(url, size=16):
             _default_browser_icon[size] = _get_or_create_default_browser_icon(size)
         return _default_browser_icon[size]
 
+    key = generate_icon_cache_key(url, size)
     domain = urlparse(url).netloc
-    key = (domain, size)
     with _icon_cache_lock:
         if key in _icon_cache:
             return _icon_cache.get(key)
@@ -1291,19 +1303,8 @@ class LinksEditDialog(tk.Toplevel):
         canvas_width = self.link_canvas.winfo_width() or 360
         for i, link in enumerate(links):
             path = link['path']
-            icon = None
-            if path.startswith('http'):
-                domain = urlparse(path).netloc
-                key = (domain, self.link_icon_size)
-                icon = _icon_cache.get(key)
-            else:
-                executable_path = extract_executable_path(path)
-                if self.link_icon_size > 20:
-                    flags = 0x100 | 0x0
-                else:
-                    flags = 0x100 | 0x1
-                key = (executable_path, self.link_icon_size, flags)
-                icon = _icon_cache.get(key)
+            key = generate_icon_cache_key(path, self.link_icon_size)
+            icon = _icon_cache.get(key)
             if not icon:
                 icon = _create_fallback_icon(self.link_icon_size)
             if icon:
@@ -1420,7 +1421,7 @@ class LinksEditDialog(tk.Toplevel):
             delta = 1
         else:
             delta = -1 * (event.delta // 120)
-            
+        
         self.link_canvas.yview_scroll(delta, "units")
 
     def _on_search_change(self, *args):
@@ -1780,7 +1781,6 @@ class LinkPopup(tk.Toplevel):
             if widget and widget.winfo_exists():
                 widget.destroy()
         self._popup_cache.clear()
-        print("Sub-popup cache cleared.") # デバッグ用
 
     def reload_links(self):
         self.link_items.clear()
@@ -1960,16 +1960,8 @@ class LinkPopup(tk.Toplevel):
             # --- ▼▼▼ アイコン処理（クリーンアップ版）▼▼▼ ---
             size = self.icon_size
             icon = None
-            key = None
 
-            # 1. キャッシュキーを生成
-            if path.startswith(('http://', 'https://')):
-                domain = urlparse(path).netloc
-                key = (domain, size)
-            else:
-                executable_path = extract_executable_path(path)
-                flags = 0x100 | (0x1 if size <= 20 else 0x0)
-                key = (executable_path, size, flags)
+            key = generate_icon_cache_key(path, size)
             
             # 2. キャッシュからアイコンを読み込む（ロックで保護）
             with _icon_cache_lock:
@@ -2053,7 +2045,7 @@ class LinkPopup(tk.Toplevel):
 
         # --- ▲▲▲ キャッシュロジックここまで ▲▲▲ ---
 
-        # 2. 座標を計算して表示する（この部分は変更なし）
+        # 2. 座標を計算して表示する
         self.update_idletasks()
         popup.update_idletasks()
         
@@ -2078,8 +2070,6 @@ class LinkPopup(tk.Toplevel):
         popup.deiconify() # 非表示状態から表示状態へ
         
         self.link_popup = popup
-
-
 
     def _delayed_hide(self):
         if not self._point_in_window(self.winfo_pointerx(), self.winfo_pointery(), self) and \
@@ -2194,8 +2184,6 @@ class ProfileManagerDialog(tk.Toplevel): # LinksEditDialogと同じくToplevel�
             self.destroy()
         else:
              messagebox.showwarning("警告", "切り替えるプロファイルを選択してください。", parent=self)
-
-    # ... (refresh_list, get_selected_profile, add_profile, rename_profile, delete_profile は変更なし) ...
 
     def refresh_list(self):
         """リストボックスの内容を更新する"""
@@ -2489,6 +2477,8 @@ def main():
             logging.warning(f"[preload] Preload thread failed: {e}")
 
     threading.Thread(target=lambda: preload_all_link_icons(current_profile_name), daemon=True).start()
+
+    threading.Thread(target=icon_worker, daemon=True).start()
 
     # 1. ルートウィンドウを先に作成する
     root = tk.Tk()
